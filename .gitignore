@@ -10,3 +10,6 @@ UnusedApps_*.csv
 # Windows
 Thumbs.db
 desktop.ini
+
+.claude/
+
