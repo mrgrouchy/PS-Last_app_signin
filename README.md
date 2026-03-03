@@ -1,14 +1,14 @@
 # PS-Last_app_signin
 
-A PowerShell script that audits Azure AD / Entra ID app registrations for inactivity and unused credentials. Uses **Log Analytics / Microsoft Sentinel** as the primary sign-in data source, with an automatic fallback to the **Entra audit log API** for non-interactive sign-ins when that table is not streamed into your workspace. Exports a risk-classified CSV report.
+A PowerShell script that audits Azure AD / Entra ID app registrations for inactivity and unused credentials. Uses **Log Analytics / Microsoft Sentinel** for interactive + service principal sign-ins, and the **Entra audit log API** for non-interactive sign-ins. Exports a risk-classified CSV report.
 
 ## What It Does
 
-- Queries **Log Analytics** via KQL for 180 days of interactive, non-interactive, and service principal sign-in activity
-  - The KQL union uses `isfuzzy=true` so a missing table (e.g. `AADNonInteractiveUserSignInLogs` not connected to Sentinel) is silently skipped rather than causing an error
-- If no non-interactive data is returned from Sentinel, automatically falls back to querying the **Entra audit log API** (`/beta/auditLogs/signIns`) for the last 30 days of non-interactive sign-ins
+- Queries **Log Analytics** via KQL for 180 days of interactive and service principal sign-in activity
+  - Uses `SigninLogs` and `AADServicePrincipalSignInLogs`
+- Queries the **Entra audit log API** (`/beta/auditLogs/signIns`) for the last 30 days of non-interactive user sign-ins
 - Fetches all **app registrations** and **service principals** from Microsoft Graph
-- Combines both sources for the most complete activity picture per app
+- Combines all sources for the most complete activity picture per app
 - Classifies each app with a **risk level** (High / Medium / Low / Active / Ignore)
 - Exports a full CSV report and prints a summary + high-risk list to the console
 
@@ -23,7 +23,7 @@ Install-Module Microsoft.Graph.Applications    -Scope CurrentUser
 Install-Module Az.OperationalInsights          -Scope CurrentUser
 ```
 
-- A **Log Analytics workspace** with at least `SigninLogs` and `AADServicePrincipalSignInLogs` connected. `AADNonInteractiveUserSignInLogs` is optional — if absent the script falls back to Entra automatically.
+- A **Log Analytics workspace** with `SigninLogs` and `AADServicePrincipalSignInLogs` connected.
 - An account with the following permissions:
   - **Microsoft Graph**: `Application.Read.All`, `Directory.Read.All` *(requires admin consent)*
   - **Azure**: read access to the Log Analytics workspace (e.g. `Log Analytics Reader`)
@@ -35,6 +35,8 @@ Before running, set your workspace ID at the top of the script:
 ```powershell
 $WorkspaceId = "<your-log-analytics-workspace-id>"
 ```
+
+The script validates this value and exits if the placeholder is still present.
 
 ## Usage
 
@@ -57,7 +59,7 @@ The script will prompt you to authenticate via `Connect-MgGraph` and `Connect-Az
 | `SPEnabled` | Whether the service principal is enabled |
 | `SPType` | Service principal type |
 | `LastInteractiveSignIn` | Most recent interactive user sign-in (from Log Analytics) |
-| `LastNonInteractiveSignIn` | Most recent non-interactive sign-in (from Log Analytics if available, otherwise from Entra audit logs — 30-day window) |
+| `LastNonInteractiveSignIn` | Most recent non-interactive sign-in (from Entra audit logs, 30-day window) |
 | `LastSPSignIn` | Most recent service principal sign-in (from Log Analytics) |
 | `LastActivityOverall` | Most recent sign-in across all vectors |
 | `DaysSinceActivity` | Days since last sign-in |
@@ -86,8 +88,8 @@ The script will prompt you to authenticate via `Connect-MgGraph` and `Connect-Az
 
 ## Notes
 
-- Sign-in data requires Entra diagnostic logs to be routed to a Log Analytics workspace. At minimum, connect `SigninLogs` and `AADServicePrincipalSignInLogs`. `AADNonInteractiveUserSignInLogs` is optional — if it is not streamed, the script automatically queries the Entra audit log API as a fallback.
-- The Entra audit log API retains non-interactive sign-ins for **30 days** (vs. up to 180 days if the table is in Sentinel/Log Analytics). To get the full 180-day window for non-interactive sign-ins, connect `AADNonInteractiveUserSignInLogs` to your workspace.
+- Sign-in data requires Entra diagnostic logs to be routed to a Log Analytics workspace. At minimum, connect `SigninLogs` and `AADServicePrincipalSignInLogs`.
+- The Entra audit log API retains non-interactive sign-ins for **30 days**. `LastNonInteractiveSignIn` is therefore based on a 30-day window.
 - If no data at all is found in Log Analytics for a given app, the SP `signInActivity` field from Graph is used as a final fallback.
 - The 180-day window is baked into the KQL query and can be adjusted there.
 - The script is **read-only** — it makes no changes to your tenant.

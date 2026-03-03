@@ -8,6 +8,10 @@ $WorkspaceId = "<your-log-analytics-workspace-id>"
 $ExportPath  = "UnusedApps_$(Get-Date -Format 'yyyyMMdd').csv"
 #endregion
 
+if (-not $WorkspaceId -or $WorkspaceId -eq "<your-log-analytics-workspace-id>") {
+    throw "Set a valid Log Analytics WorkspaceId before running."
+}
+
 #region --- LOG ANALYTICS: Sign-in activity (all types, 180 days) ---
 Write-Host "Querying Log Analytics for sign-in activity..." -ForegroundColor Cyan
 
@@ -35,6 +39,26 @@ Write-Host "  LA returned activity for $($laRows.Count) apps" -ForegroundColor G
 
 #endregion
 
+#region --- GRAPH FALLBACK: Non-interactive sign-ins (30 days) ---
+Write-Host "Fetching non-interactive sign-ins from Graph audit logs (last 30d)..." -ForegroundColor Cyan
+$cutoff = (Get-Date).AddDays(-30).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$uri = "https://graph.microsoft.com/beta/auditLogs/signIns?`$filter=createdDateTime ge $cutoff and signInEventTypes/any(t:t eq 'nonInteractiveUser')&`$select=appId,createdDateTime&`$top=1000"
+
+$niLookup = @{}
+while ($uri) {
+    $resp = Invoke-MgGraphRequest -Method GET -Uri $uri
+    foreach ($row in $resp.value) {
+        if (-not $row.appId) { continue }
+        $dt = [datetime]$row.createdDateTime
+        if (-not $niLookup.ContainsKey($row.appId) -or $dt -gt $niLookup[$row.appId]) {
+            $niLookup[$row.appId] = $dt
+        }
+    }
+    $uri = $resp.'@odata.nextLink'
+}
+Write-Host "  Graph returned non-interactive activity for $($niLookup.Count) apps" -ForegroundColor Gray
+#endregion
+
 #region --- GRAPH: App registrations + Service principals ---
 Write-Host "Fetching app registrations from Graph..." -ForegroundColor Cyan
 $allApps = Get-MgApplication -All -Property "id,appId,displayName,createdDateTime,signInAudience,requiredResourceAccess,passwordCredentials,keyCredentials,notes,owners"
@@ -58,6 +82,7 @@ $report = foreach ($app in $allApps) {
 
     # --- Sign-in dates from LA ---
     $lastInteractive      = if ($la.LastInteractive      -and $la.LastInteractive      -ne "0001-01-01T00:00:00") { [datetime]$la.LastInteractive }      else { $null }
+    $lastNonInteractive   = if ($niLookup.ContainsKey($app.AppId)) { $niLookup[$app.AppId] } else { $null }
     $lastServicePrincipal = if ($la.LastServicePrincipal -and $la.LastServicePrincipal -ne "0001-01-01T00:00:00") { [datetime]$la.LastServicePrincipal } else { $null }
     $lastOverall          = if ($la.LastActivity         -and $la.LastActivity         -ne "0001-01-01T00:00:00") { [datetime]$la.LastActivity }         else { $null }
 
@@ -65,7 +90,7 @@ $report = foreach ($app in $allApps) {
     $spFallback = if ($sp.SignInActivity.LastSignInDateTime) { [datetime]$sp.SignInActivity.LastSignInDateTime } else { $null }
 
     # True last activity across all vectors
-    $allDates = @($lastInteractive, $lastServicePrincipal, $lastOverall, $spFallback) |
+    $allDates = @($lastInteractive, $lastNonInteractive, $lastServicePrincipal, $lastOverall, $spFallback) |
                 Where-Object { $_ } | Sort-Object -Descending
     $trueLastActivity = $allDates | Select-Object -First 1
 
@@ -92,6 +117,7 @@ $report = foreach ($app in $allApps) {
         ($hasSecrets -and $secretExpired -and
          $hasCerts   -and $certExpired)                  { "All Creds Expired" }
         ($hasSecrets -and $secretExpired -and -not $hasCerts) { "All Creds Expired" }
+        (-not $hasSecrets -and $hasCerts -and $certExpired)    { "All Creds Expired" }
         (-not $trueLastActivity -and $appAgeDays -ge 30) { "Never Used" }
         ($daysSinceActivity -gt 180)                     { "Inactive >180d" }
         default                                          { $null }
@@ -118,6 +144,7 @@ $report = foreach ($app in $allApps) {
         SPType                    = $sp.ServicePrincipalType
         # Sign-in breakdown
         LastInteractiveSignIn     = $lastInteractive
+        LastNonInteractiveSignIn  = $lastNonInteractive
         LastSPSignIn              = $lastServicePrincipal
         LastActivityOverall       = $trueLastActivity
         DaysSinceActivity         = $daysSinceActivity
