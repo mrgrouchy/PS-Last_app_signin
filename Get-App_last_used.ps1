@@ -120,7 +120,7 @@ function Get-AppRoleAssignments {
 
   $uri = "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignedTo?`$top=999"
 
-  $items = Get-AllGraphPages $uri
+  $items = @(Get-AllGraphPages $uri)
 
   return $items.Count
 }
