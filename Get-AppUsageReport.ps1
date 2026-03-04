@@ -1,3 +1,42 @@
+<#
+.SYNOPSIS
+  Audits Entra ID service principals for inactivity and structural dependencies.
+
+.DESCRIPTION
+  Combines Graph SP sign-in activity (180d) with optional Log Analytics user
+  sign-ins (interactive + non-interactive) to produce the widest possible
+  activity picture per app. Outputs a risk-classified report.
+
+.PARAMETER UnusedDays
+  Days of inactivity before an app is considered unused. Default: 180.
+
+.PARAMETER WorkspaceId
+  Log Analytics workspace ID. When supplied, also queries SigninLogs and
+  AADNonInteractiveUserSignInLogs (isfuzzy=true — missing tables are skipped).
+  Omit to run Graph-only.
+
+.PARAMETER LookbackDays
+  How far back to query Log Analytics. Should not exceed your workspace
+  retention. Default: 90.
+
+.PARAMETER IncludeNeverUsed
+  Include service principals with no recorded sign-in activity at all.
+
+.PARAMETER OutCsv
+  Path to export a CSV report. If omitted, no file is written.
+
+.EXAMPLE
+  # Graph only — 180d SP activity, no LA required
+  .\Get-AppUsageReport.ps1 -OutCsv .\report.csv
+
+.EXAMPLE
+  # Graph + Log Analytics — adds 90d interactive/non-interactive user sign-ins
+  .\Get-AppUsageReport.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -OutCsv .\report.csv
+
+.EXAMPLE
+  # Custom thresholds, include never-used apps
+  .\Get-AppUsageReport.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
+#>
 param(
   [int]$UnusedDays    = 180,
   [string]$WorkspaceId = "",
