@@ -120,9 +120,7 @@ function Get-AppRoleAssignments {
 
   $uri = "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignedTo?`$top=999"
 
-  $resp = Invoke-MgGraphRequest -Uri $uri -Method GET
-
-  $items = @($resp.value)
+  $items = Get-AllGraphPages $uri
 
   return $items.Count
 }
