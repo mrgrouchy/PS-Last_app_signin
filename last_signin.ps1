@@ -39,9 +39,9 @@ Write-Host "  LA returned activity for $($laRows.Count) apps" -ForegroundColor G
 
 #endregion
 
-#region --- GRAPH FALLBACK: Non-interactive sign-ins (30 days) ---
-Write-Host "Fetching non-interactive sign-ins from Graph audit logs (last 30d)..." -ForegroundColor Cyan
-$cutoff = (Get-Date).AddDays(-30).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+#region --- GRAPH FALLBACK: Non-interactive sign-ins (180 days) ---
+Write-Host "Fetching non-interactive sign-ins from Graph audit logs (last 180d)..." -ForegroundColor Cyan
+$cutoff = (Get-Date).AddDays(-180).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $uri = "https://graph.microsoft.com/beta/auditLogs/signIns?`$filter=createdDateTime ge $cutoff and signInEventTypes/any(t:t eq 'nonInteractiveUser')&`$select=appId,createdDateTime&`$top=1000"
 
 $niLookup = @{}

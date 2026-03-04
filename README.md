@@ -6,7 +6,7 @@ A PowerShell script that audits Azure AD / Entra ID app registrations for inacti
 
 - Queries **Log Analytics** via KQL for 180 days of interactive and service principal sign-in activity
   - Uses `SigninLogs` and `AADServicePrincipalSignInLogs`
-- Queries the **Entra audit log API** (`/beta/auditLogs/signIns`) for the last 30 days of non-interactive user sign-ins
+- Queries the **Entra audit log API** (`/beta/auditLogs/signIns`) for the last 180 days of non-interactive user sign-ins
 - Fetches all **app registrations** and **service principals** from Microsoft Graph
 - Combines all sources for the most complete activity picture per app
 - Classifies each app with a **risk level** (High / Medium / Low / Active / Ignore)
@@ -59,7 +59,7 @@ The script will prompt you to authenticate via `Connect-MgGraph` and `Connect-Az
 | `SPEnabled` | Whether the service principal is enabled |
 | `SPType` | Service principal type |
 | `LastInteractiveSignIn` | Most recent interactive user sign-in (from Log Analytics) |
-| `LastNonInteractiveSignIn` | Most recent non-interactive sign-in (from Entra audit logs, 30-day window) |
+| `LastNonInteractiveSignIn` | Most recent non-interactive sign-in (from Entra audit logs, 180-day window) |
 | `LastSPSignIn` | Most recent service principal sign-in (from Log Analytics) |
 | `LastActivityOverall` | Most recent sign-in across all vectors |
 | `DaysSinceActivity` | Days since last sign-in |
@@ -89,7 +89,7 @@ The script will prompt you to authenticate via `Connect-MgGraph` and `Connect-Az
 ## Notes
 
 - Sign-in data requires Entra diagnostic logs to be routed to a Log Analytics workspace. At minimum, connect `SigninLogs` and `AADServicePrincipalSignInLogs`.
-- The Entra audit log API retains non-interactive sign-ins for **30 days**. `LastNonInteractiveSignIn` is therefore based on a 30-day window.
+- The Entra audit log API retains non-interactive sign-ins for up to **180 days**. `LastNonInteractiveSignIn` is therefore based on a 180-day window.
 - If no data at all is found in Log Analytics for a given app, the SP `signInActivity` field from Graph is used as a final fallback.
 - The 180-day window is baked into the KQL query and can be adjusted there.
 - The script is **read-only** — it makes no changes to your tenant.
