@@ -1,4 +1,4 @@
-# PS-Last_app_signin
+﻿# PS-Last_app_signin
 
 PowerShell scripts for auditing Entra ID / Azure AD service principal and app registration activity, to identify unused apps that are safe to disable.
 
@@ -116,6 +116,23 @@ Install-Module Az.OperationalInsights -Scope CurrentUser
 | `SafeToDisable` | `True` if Low/Medium risk AND no dependency signals |
 | `DependencySignals` | Semicolon-separated structural reasons the app may still be needed |
 
+### Sign-in Field Reference
+
+| Field | Source | Who is acting | User involved | This app is... |
+|---|---|---|---|---|
+| `LastInteractiveSignIn` | LA `SigninLogs` | Human user | Yes | Being logged into |
+| `LastNonInteractiveSignIn` | LA `AADNonInteractiveUserSignInLogs` | Token refresh | Yes (silently) | Maintaining a user session |
+| `DelegatedClientUtc` | Graph | This app | Yes | Calling another API on behalf of a user |
+| `DelegatedResourceUtc` | Graph | Another app | Yes | Being called as an API on behalf of a user |
+| `AppAuthClientUtc` | Graph | This app | No | Calling another API autonomously |
+| `AppAuthResourceUtc` | Graph | Another app | No | Being called as an API autonomously |
+
+- **`LastInteractiveSignIn`** â€” A user was prompted to sign in. MFA challenges happen here. The classic "user logged into the app" event.
+- **`LastNonInteractiveSignIn`** â€” A token was silently refreshed on behalf of a user with no prompt shown. High-volume, low-visibility signal that an app is actively in use.
+- **`DelegatedClientUtc`** â€” This app called another API on behalf of a signed-in user (e.g. a web app calling Graph with the user's identity). Confirms the app is making outbound API calls.
+- **`DelegatedResourceUtc`** â€” Another app called this app's API on behalf of a user. Strong signal this app is still needed as a dependency. Surfaces as `UsedAsAPI` in `DependencySignals`.
+- **`AppAuthClientUtc`** â€” This app authenticated to another API using its own identity (client credentials / app-only). Daemon services, background jobs, and automation pipelines appear here.
+- **`AppAuthResourceUtc`** â€” Another app authenticated to this app's API using app-only flow. Confirms this app is being consumed service-to-service. Surfaces as `UsedAsAPIAppOnly` in `DependencySignals`.
 ### Risk Classification
 
 | Risk Level | Criteria |
