@@ -1,0 +1,26 @@
+# Output files
+*.csv
+*.xlsx
+*.json
+*.xml
+*.log
+
+# PowerShell transcript files
+*_transcript.txt
+transcript_*.txt
+
+# Credential and secret files
+*credential*.xml
+*secret*
+*password*
+*.cred
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# VS Code
+.vscode/
+
+# Claude Code local settings
+.claude/settings.local.json
