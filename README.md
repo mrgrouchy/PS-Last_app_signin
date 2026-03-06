@@ -61,6 +61,9 @@ Install-Module Az.OperationalInsights -Scope CurrentUser
 
 # Custom inactivity threshold, include apps that have never signed in
 .\Get-AppUsageReport.ps1 -WorkspaceId "<guid>" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
+
+# Scope the run to a specific list of service principals from a CSV
+.\Get-AppUsageReport.ps1 -InputCsv .\targets.csv -OutCsv .\report.csv
 ```
 
 ### Parameters
@@ -71,7 +74,19 @@ Install-Module Az.OperationalInsights -Scope CurrentUser
 | `-WorkspaceId` | _(empty)_ | Log Analytics workspace ID. Omit to run Graph-only |
 | `-LookbackDays` | `90` | LA query window — should not exceed your workspace retention |
 | `-IncludeNeverUsed` | off | Include SPs with no recorded sign-in activity |
+| `-InputCsv` | _(empty)_ | Path to a CSV of SP/app IDs to query. See [InputCsv filtering](#inputcsv-filtering) below |
 | `-OutCsv` | _(empty)_ | Path to export CSV. No file written if omitted |
+
+### InputCsv Filtering
+
+Pass `-InputCsv` with a CSV file to restrict the report to a specific set of service principals instead of scanning the whole tenant. The script detects the ID column automatically using these common names (first match wins):
+
+| Priority | Column names checked |
+|---|---|
+| SP Object ID | `ServicePrincipalId`, `id`, `ObjectId`, `SpObjectId`, `SpId`, `ServicePrincipalObjectId` |
+| App ID (fallback) | `AppId`, `ApplicationId`, `ClientId` |
+
+If no recognised column is found, a warning is printed and the full tenant scan continues unfiltered. The output CSV from a previous run can be fed directly back in as input (it contains both `ServicePrincipalId` and `AppId`).
 
 ### Sign-in Data Sources
 
