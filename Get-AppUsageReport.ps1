@@ -22,6 +22,13 @@
 .PARAMETER IncludeNeverUsed
   Include service principals with no recorded sign-in activity at all.
 
+.PARAMETER InputCsv
+  Path to a CSV file containing service principal IDs or app IDs to query.
+  Only those service principals will be included in the report.
+  Recognised column names (first match wins):
+    SP Object ID : ServicePrincipalId, id, ObjectId, SpObjectId, SpId, ServicePrincipalObjectId
+    App ID       : AppId, ApplicationId, ClientId
+
 .PARAMETER OutCsv
   Path to export a CSV report. If omitted, no file is written.
 
@@ -42,6 +49,7 @@ param(
   [string]$WorkspaceId = "",
   [int]$LookbackDays  = 90,
   [switch]$IncludeNeverUsed,
+  [string]$InputCsv   = "",
   [string]$OutCsv     = ""
 )
 
@@ -231,6 +239,45 @@ union isfuzzy=true
 Write-Host "Fetching service principals..." -ForegroundColor Cyan
 $servicePrincipals = Get-AllGraphPages "https://graph.microsoft.com/v1.0/servicePrincipals?`$select=id,displayName,appId,servicePrincipalType,accountEnabled&`$top=999"
 Write-Host "  Service principals: $($servicePrincipals.Count)"
+
+# ------------------------------------------------------------
+# InputCsv filter — restrict to specific SPs if supplied
+# ------------------------------------------------------------
+
+if ($InputCsv) {
+  Write-Host "Filtering to service principals from '$InputCsv'..." -ForegroundColor Cyan
+
+  $csvRows = Import-Csv $InputCsv
+  if ($csvRows.Count -eq 0) {
+    Write-Warning "InputCsv '$InputCsv' is empty — no filter applied."
+  } else {
+    $colNames = $csvRows[0].PSObject.Properties.Name
+
+    $spIdColCandidates  = @("ServicePrincipalId","id","ObjectId","SpObjectId","SpId","ServicePrincipalObjectId")
+    $appIdColCandidates = @("AppId","ApplicationId","ClientId")
+
+    $spIdCol  = $spIdColCandidates  | Where-Object { $colNames -contains $_ } | Select-Object -First 1
+    $appIdCol = $appIdColCandidates | Where-Object { $colNames -contains $_ } | Select-Object -First 1
+
+    if (-not $spIdCol -and -not $appIdCol) {
+      Write-Warning ("InputCsv: no recognised ID column found.`n" +
+        "  Expected one of: $($spIdColCandidates + $appIdColCandidates -join ', ')`n" +
+        "  Columns in file : $($colNames -join ', ')`nNo filter applied.")
+    } else {
+      $filterIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+      if ($spIdCol) {
+        $csvRows | ForEach-Object { if ($_.$spIdCol)  { [void]$filterIds.Add($_.$spIdCol)  } }
+        $servicePrincipals = @($servicePrincipals | Where-Object { $filterIds.Contains((Get-Prop $_ "id")) })
+        Write-Host "  Matched $($servicePrincipals.Count) SP(s) by column '$spIdCol'" -ForegroundColor Gray
+      } else {
+        $csvRows | ForEach-Object { if ($_.$appIdCol) { [void]$filterIds.Add($_.$appIdCol) } }
+        $servicePrincipals = @($servicePrincipals | Where-Object { $filterIds.Contains((Get-Prop $_ "appId")) })
+        Write-Host "  Matched $($servicePrincipals.Count) SP(s) by column '$appIdCol'" -ForegroundColor Gray
+      }
+    }
+  }
+}
 
 # ------------------------------------------------------------
 # Graph: all app registrations (bulk fetch — avoids per-SP calls)
