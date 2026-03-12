@@ -8,7 +8,7 @@ PowerShell scripts for auditing Entra ID / Azure AD service principal and app re
 
 ### `Get-AppUsageReport.ps1` — Recommended
 
-The primary, merged script. Combines **Graph SP sign-in activity (180d)** with optional **Log Analytics user sign-ins** for the widest possible activity picture. No LA workspace required to run.
+The primary, merged script. Combines **Graph SP sign-in activity (180d)** with optional **Log Analytics user and workload sign-ins** for the widest possible activity picture. No LA workspace required to run.
 
 ---
 
@@ -17,10 +17,10 @@ The primary, merged script. Combines **Graph SP sign-in activity (180d)** with o
 ### What It Does
 
 - Fetches **SP sign-in activity** from Graph (`/beta/reports/servicePrincipalSignInActivities`) — up to **180 days**, Microsoft-managed retention independent of your LA workspace
-- Optionally queries **Log Analytics** for interactive and non-interactive **user** sign-ins (`isfuzzy=true` — missing tables are silently skipped)
+- Optionally queries **Log Analytics** for interactive user, service principal, and managed identity sign-ins (`isfuzzy=true` — missing tables are silently skipped)
 - Pre-fetches all **app registrations** in bulk for credential and age analysis
 - For each service principal, checks:
-  - Last sign-in across all vectors (delegated, app-only, interactive user, non-interactive user)
+  - Last sign-in across all vectors (delegated, app-only, interactive user, SP, managed identity)
   - App role assignments and OAuth permission grants (structural dependency signals)
   - Credential liveness (secrets and certificates, with expiry dates)
 - Classifies each app with a **risk level** and **SafeToDisable** flag
@@ -48,7 +48,7 @@ Install-Module Az.OperationalInsights -Scope CurrentUser
 # Graph only — 180d SP activity, no LA required
 .\Get-AppUsageReport.ps1 -OutCsv .\report.csv
 
-# Graph + Log Analytics — adds 90d interactive/non-interactive user sign-ins
+# Graph + Log Analytics — adds 90d interactive user and workload sign-ins
 .\Get-AppUsageReport.ps1 -WorkspaceId "<guid>" -OutCsv .\report.csv
 
 # Custom inactivity threshold, include apps that have never signed in
@@ -75,10 +75,10 @@ Pass `-InputCsv` with a CSV file to restrict the report to a specific set of ser
 
 | Priority | Column names checked |
 |---|---|
-| SP Object ID | `ServicePrincipalId`, `id`, `ObjectId`, `SpObjectId`, `SpId`, `ServicePrincipalObjectId` |
-| App ID (fallback) | `AppId`, `ApplicationId`, `ClientId` |
+| SP Object ID | `ServicePrincipalObjectId`, `ServicePrincipalObjectID`, `ServicePrincipalId`, `SPObjectId`, `SPId`, `SP_Id`, `ObjectId`, `Id` |
+| App ID (fallback) | `AppId`, `ApplicationId` |
 
-If no recognised column is found, a warning is printed and the full tenant scan continues unfiltered. The output CSV from a previous run can be fed directly back in as input (it contains both `ServicePrincipalId` and `AppId`).
+When SP object ID columns are present, AppId matching is disabled — SP IDs take full precedence. If no recognised column is found, the first column in the CSV is used as SP object ID with a warning. The output CSV from a previous run can be fed directly back in as input (it contains both `ServicePrincipalId` and `AppId`).
 
 ### Sign-in Data Sources
 
@@ -86,9 +86,10 @@ If no recognised column is found, a warning is printed and the full tenant scan 
 |---|---|---|
 | Graph `servicePrincipalSignInActivities` | SP delegated + app-only sign-ins | Up to 180 days |
 | LA `SigninLogs` | Interactive user sign-ins | Your workspace retention |
-| LA `AADNonInteractiveUserSignInLogs` | Non-interactive user sign-ins | Your workspace retention |
+| LA `AADServicePrincipalSignInLogs` | Service principal sign-ins | Your workspace retention |
+| LA `AADManagedIdentitySignInLogs` | Managed identity sign-ins | Your workspace retention |
 
-`TrueLastActivity` in the report is the maximum date across all six activity vectors.
+`TrueLastActivity` in the report is the maximum date across all seven activity vectors.
 
 ### Output Columns
 
@@ -99,12 +100,14 @@ If no recognised column is found, a warning is printed and the full tenant scan 
 | `AppRegistrationObjectId` | Object ID of the backing app registration (null for external SPs) |
 | `ServicePrincipalId` | Object ID of the service principal |
 | `ServicePrincipalType` | Application / ManagedIdentity / Legacy / etc. |
-| `AccountEnabled` | Whether the service principal is enabled |
+| `AccountEnabled` | Combined enabled state (SP + app registration). `False` if either is disabled |
+| `ServicePrincipalActivation` | Whether the service principal itself is enabled (independent of the app registration) |
 | `CreatedDaysAgo` | Age of the app registration in days |
 | `TrueLastActivity` | Most recent sign-in across all vectors |
 | `DaysSinceActivity` | Days since `TrueLastActivity` |
-| `LastInteractiveSignIn` | Last interactive user sign-in (from LA) |
-| `LastNonInteractiveSignIn` | Last non-interactive user sign-in (from LA) |
+| `LastInteractiveSignIn` | Last interactive user sign-in (from LA `SigninLogs`) |
+| `LastServicePrincipalSignIn` | Last service principal sign-in (from LA `AADServicePrincipalSignInLogs`) |
+| `LastManagedIdentitySignIn` | Last managed identity sign-in (from LA `AADManagedIdentitySignInLogs`) |
 | `DelegatedClientUtc` | Last delegated sign-in where this app was the client (Graph) |
 | `DelegatedResourceUtc` | Last delegated sign-in where this app was the resource/API (Graph) |
 | `AppAuthClientUtc` | Last app-only sign-in where this app was the client (Graph) |
@@ -128,15 +131,17 @@ If no recognised column is found, a warning is printed and the full tenant scan 
 | Field | Source | Who is acting | User involved | This app is... |
 |---|---|---|---|---|
 | `LastInteractiveSignIn` | LA `SigninLogs` | Human user | Yes | Being logged into |
-| `LastNonInteractiveSignIn` | LA `AADNonInteractiveUserSignInLogs` | Token refresh | Yes (silently) | Maintaining a user session |
+| `LastServicePrincipalSignIn` | LA `AADServicePrincipalSignInLogs` | Service principal | No | Authenticating as a workload identity |
+| `LastManagedIdentitySignIn` | LA `AADManagedIdentitySignInLogs` | Managed identity | No | Authenticating via managed identity |
 | `DelegatedClientUtc` | Graph | This app | Yes | Calling another API on behalf of a user |
 | `DelegatedResourceUtc` | Graph | Another app | Yes | Being called as an API on behalf of a user |
 | `AppAuthClientUtc` | Graph | This app | No | Calling another API autonomously |
 | `AppAuthResourceUtc` | Graph | Another app | No | Being called as an API autonomously |
 
-- **`LastInteractiveSignIn`** â€” A user was prompted to sign in. MFA challenges happen here. The classic "user logged into the app" event.
-- **`LastNonInteractiveSignIn`** â€” A token was silently refreshed on behalf of a user with no prompt shown. High-volume, low-visibility signal that an app is actively in use.
-- **`DelegatedClientUtc`** â€” This app called another API on behalf of a signed-in user (e.g. a web app calling Graph with the user's identity). Confirms the app is making outbound API calls.
+- **`LastInteractiveSignIn`** — A user was prompted to sign in. MFA challenges happen here. The classic “user logged into the app” event.
+- **`LastServicePrincipalSignIn`** — The app authenticated as a service principal (e.g. via client secret or certificate). Captured in LA `AADServicePrincipalSignInLogs`. Complements the Graph activity timestamps with workspace-retention-based visibility.
+- **`LastManagedIdentitySignIn`** — The app authenticated via a managed identity. Captured in LA `AADManagedIdentitySignInLogs`. Useful for Azure-hosted workloads that rely on system- or user-assigned managed identities rather than explicit credentials.
+- **`DelegatedClientUtc`** — This app called another API on behalf of a signed-in user (e.g. a web app calling Graph with the user's identity). Confirms the app is making outbound API calls.
 - **`DelegatedResourceUtc`** â€” Another app called this app's API on behalf of a user. Strong signal this app is still needed as a dependency. Surfaces as `UsedAsAPI` in `DependencySignals`.
 - **`AppAuthClientUtc`** â€” This app authenticated to another API using its own identity (client credentials / app-only). Daemon services, background jobs, and automation pipelines appear here.
 - **`AppAuthResourceUtc`** â€” Another app authenticated to this app's API using app-only flow. Confirms this app is being consumed service-to-service. Surfaces as `UsedAsAPIAppOnly` in `DependencySignals`.
