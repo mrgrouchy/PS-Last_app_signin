@@ -263,6 +263,60 @@ function Get-OAuthGrantsResource {
   return @($resp.value).Count
 }
 
+function Get-SynchronizationJobInfo {
+  param($spId)
+
+  try {
+    $resp = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/synchronization/jobs" -Method GET
+    $jobs = @($resp.value)
+    $activeStates = @('Active', 'InProgress', 'Running')
+    $activeCount = @(
+      $jobs | Where-Object {
+        $state = Get-ValueByPath $_ 'status.code'
+        $state -and ($activeStates -contains $state)
+      }
+    ).Count
+
+    return [pscustomobject]@{
+      JobCount    = $jobs.Count
+      ActiveCount = $activeCount
+      CheckStatus = 'Ok'
+    }
+  }
+  catch {
+    return [pscustomobject]@{
+      JobCount    = $null
+      ActiveCount = $null
+      CheckStatus = 'Unavailable'
+    }
+  }
+}
+
+function Get-FederatedCredentialInfo {
+  param($appRegObjectId)
+
+  if ([string]::IsNullOrWhiteSpace($appRegObjectId)) {
+    return [pscustomobject]@{
+      Count       = 0
+      CheckStatus = 'NotApplicable'
+    }
+  }
+
+  try {
+    $resp = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/applications/$appRegObjectId/federatedIdentityCredentials" -Method GET
+    return [pscustomobject]@{
+      Count       = @($resp.value).Count
+      CheckStatus = 'Ok'
+    }
+  }
+  catch {
+    return [pscustomobject]@{
+      Count       = $null
+      CheckStatus = 'Unavailable'
+    }
+  }
+}
+
 # ============================================================
 # DATA COLLECTION
 # ============================================================
@@ -532,6 +586,8 @@ $report = foreach ($sp in $servicePrincipals) {
 
   $hasLiveCreds = ($hasSecrets -and -not $secretExpired) -or ($hasCerts -and -not $certExpired)
 
+  $ownershipClass = if ($appReg) { 'TenantOwned' } else { 'NonTenantOwned' }
+
   # Effective enabled state:
   # - If local app registration exists, combine SP activation + appReg disabled state
   # - If no local app registration (e.g., first-party/external SP), use SP activation only
@@ -546,11 +602,15 @@ $report = foreach ($sp in $servicePrincipals) {
   $roleAssignments = Get-AppRoleAssignments $spId
   $oauthClient     = Get-OAuthGrantsClient $spId
   $oauthResource   = Get-OAuthGrantsResource $spId
+  $syncInfo        = Get-SynchronizationJobInfo $spId
+  $fedCredInfo     = Get-FederatedCredentialInfo $appRegObjectId
 
   # --- Risk level (activity + credential liveness) ---
   $tooNew = $null -ne $createdDaysAgo -and $createdDaysAgo -lt 30
 
-  $riskLevel = if ($tooNew) {
+  $riskLevel = if ($ownershipClass -eq 'NonTenantOwned') {
+    "Review"
+  } elseif ($tooNew) {
     "Ignore"
   } elseif ($trueLastActivity -and $trueLastActivity -ge $cutoff) {
     "Active"
@@ -572,9 +632,18 @@ $report = foreach ($sp in $servicePrincipals) {
   if ($roleAssignments -gt 0)      { $depReasons += "AppRoleAssignments" }
   if ($oauthClient -gt 0)          { $depReasons += "OAuthClientGrants" }
   if ($oauthResource -gt 0)        { $depReasons += "OAuthResourceGrants" }
+  if ($syncInfo.JobCount -gt 0)    { $depReasons += "ProvisioningJobs" }
+  if ($syncInfo.CheckStatus -eq 'Unavailable') { $depReasons += "ProvisioningCheckUnavailable" }
+  if ($fedCredInfo.Count -gt 0)    { $depReasons += "FederatedCredentials" }
+  if ($fedCredInfo.CheckStatus -eq 'Unavailable') { $depReasons += "FederatedCredentialCheckUnavailable" }
+  if ($ownershipClass -eq 'NonTenantOwned') { $depReasons += "NonTenantOwned" }
 
-  # SafeToDisable: inactive (Low/Medium risk) AND no structural dependencies
-  $safeToDisable = $riskLevel -in @("Low", "Medium") -and $depReasons.Count -eq 0
+  # CandidateForDisableReview is intentionally conservative. It is a review signal, not a delete recommendation.
+  $candidateForDisableReview = (
+    $ownershipClass -eq 'TenantOwned' -and
+    $riskLevel -in @("Low", "Medium") -and
+    $depReasons.Count -eq 0
+  )
 
   [pscustomobject]@{
     DisplayName              = $spName
@@ -582,6 +651,7 @@ $report = foreach ($sp in $servicePrincipals) {
     AppRegistrationObjectId  = $appRegObjectId
     ServicePrincipalId       = $spId
     ServicePrincipalType     = $spType
+    OwnershipClass           = $ownershipClass
     AccountEnabled           = $effectiveAccountEnabled
     ServicePrincipalActivation = $servicePrincipalActivation
     CreatedDaysAgo           = $createdDaysAgo
@@ -599,6 +669,9 @@ $report = foreach ($sp in $servicePrincipals) {
     RoleAssignments          = $roleAssignments
     OAuthClientGrants        = $oauthClient
     OAuthResourceGrants      = $oauthResource
+    ProvisioningJobCount     = $syncInfo.JobCount
+    ActiveProvisioningJobs   = $syncInfo.ActiveCount
+    ProvisioningCheckStatus  = $syncInfo.CheckStatus
 
     HasSecrets               = $hasSecrets
     SecretExpiry             = $secretExpiry
@@ -607,9 +680,11 @@ $report = foreach ($sp in $servicePrincipals) {
     CertExpiry               = $certExpiry
     CertsExpired             = $certExpired
     HasLiveCredentials       = $hasLiveCreds
+    FederatedCredentialCount = $fedCredInfo.Count
+    FederatedCredentialCheckStatus = $fedCredInfo.CheckStatus
 
     RiskLevel                = $riskLevel
-    SafeToDisable            = $safeToDisable
+    CandidateForDisableReview = $candidateForDisableReview
     DependencySignals        = ($depReasons -join ";")
   }
 }
@@ -640,13 +715,14 @@ $report | Group-Object RiskLevel | Sort-Object Name | ForEach-Object {
     "Medium" { "Yellow" }
     "Low"    { "Gray" }
     "Active" { "Green" }
+    "Review" { "Magenta" }
     default  { "DarkGray" }
   }
   Write-Host ("  {0,-10} : {1}" -f $_.Name, $_.Count) -ForegroundColor $colour
 }
 
 Write-Host ""
-  $report | Format-Table DisplayName, TrueLastActivity, DaysSinceActivity, RiskLevel, SafeToDisable, DependencySignals -AutoSize
+  $report | Format-Table DisplayName, OwnershipClass, TrueLastActivity, DaysSinceActivity, RiskLevel, CandidateForDisableReview, DependencySignals -AutoSize
 
 if ($OutCsv) {
   $report | Export-Csv $OutCsv -NoTypeInformation
