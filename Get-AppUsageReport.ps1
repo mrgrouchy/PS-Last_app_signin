@@ -61,7 +61,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Hardcoded Log Analytics workspace
-$WorkspaceId = ""
+$WorkspaceId = "5ee1772f-c4b4-4afa-afda-0239cc35b934"
 
 # ------------------------------------------------------------
 # Load input CSV filter (if provided)
@@ -323,6 +323,8 @@ Write-Host "Fetching service principals..." -ForegroundColor Cyan
 $servicePrincipals = Get-AllGraphPages "https://graph.microsoft.com/beta/servicePrincipals?`$select=id,displayName,appId,servicePrincipalType,isDisabled&`$top=999"
 Write-Host "  Service principals: $($servicePrincipals.Count)"
 
+$allServicePrincipals = @($servicePrincipals)
+
 # Apply input CSV filter if provided
 # IMPORTANT: if SP object IDs are provided, only match on SP object ID.
 # AppId matching is a fallback only when SP object IDs are not available.
@@ -361,9 +363,48 @@ $appRegs = Get-AllGraphPages "https://graph.microsoft.com/beta/applications?`$se
 Write-Host "  App registrations: $($appRegs.Count)"
 
 $appRegByAppId = @{}
+$appRegByObjectId = @{}
 foreach ($app in $appRegs) {
+  $objId = Get-Prop $app "id"
   $id = Get-Prop $app "appId"
   if ($id) { $appRegByAppId[$id] = $app }
+  if ($objId) { $appRegByObjectId[$objId] = $app }
+}
+
+# Fallback input resolution:
+# If no SPs matched, input IDs may actually be app registration object IDs.
+if ($hasInputFilter -and $servicePrincipals.Count -eq 0 -and ($filterSpObjectIds.Count -gt 0 -or $filterAppIds.Count -gt 0)) {
+  Write-Warning "No service principals matched initial filter. Attempting fallback by resolving input IDs as app registration object IDs..."
+
+  $resolvedAppIds = @{}
+  $candidateIds = @($filterSpObjectIds.Keys + $filterAppIds.Keys) | Select-Object -Unique
+
+  foreach ($candidateId in $candidateIds) {
+    if ($appRegByObjectId.ContainsKey($candidateId)) {
+      $resolvedAppId = Get-Prop $appRegByObjectId[$candidateId] "appId"
+      if ($resolvedAppId) {
+        $resolvedAppIds[$resolvedAppId] = $true
+      }
+    }
+  }
+
+  if ($resolvedAppIds.Count -gt 0) {
+    $servicePrincipals = @($allServicePrincipals | Where-Object {
+      $spAppId = Get-Prop $_ "appId"
+      $resolvedAppIds.ContainsKey($spAppId)
+    })
+
+    Write-Host "  Fallback resolved $($resolvedAppIds.Count) app registration object ID(s) to AppId(s)." -ForegroundColor Gray
+    Write-Host "  Fallback filtered to $($servicePrincipals.Count) service principal(s)." -ForegroundColor Gray
+
+    if ($Top -gt 0) {
+      $servicePrincipals = @($servicePrincipals | Select-Object -First $Top)
+      Write-Host "  Re-applying -Top $Top after fallback => processing $($servicePrincipals.Count) service principal(s)" -ForegroundColor Gray
+    }
+  }
+  else {
+    Write-Warning "Fallback could not resolve any input IDs to app registration object IDs."
+  }
 }
 
 # ============================================================
