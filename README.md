@@ -305,6 +305,32 @@ These are independent of `RiskLevel` — an app can be `Medium` risk but still h
 
 ---
 
+## Tools
+
+The `Tools/` folder contains incidental helper scripts that are not part of the core reporting workflow. Run them only if needed.
+
+### `Tools/Backup-JsonFiles.ps1`
+
+A one-off utility to snapshot all `.json` files in a directory before making bulk changes. Not required for normal use of `Get-AppUsageReport.ps1`.
+
+**What it does:**
+
+- Copies every `.json` file in the target directory to a `Json_Backup\` subfolder
+- If a backup of the same filename already exists, the old copy is renamed with a timestamp (`filename_yyyyMMdd_HHmmss.json`) before being replaced
+- Scans top-level files only (no recursion)
+
+**Usage:**
+
+```powershell
+# Back up .json files in the current directory
+.\Tools\Backup-JsonFiles.ps1
+
+# Back up .json files in a specific directory
+.\Tools\Backup-JsonFiles.ps1 -SourceDir "C:\path\to\your\jsons"
+```
+
+---
+
 ## Notes
 
 - All scripts are **read-only** — no changes are made to your tenant.
