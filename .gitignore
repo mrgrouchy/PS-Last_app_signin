@@ -25,3 +25,6 @@ desktop.ini
 # Claude Code local settings
 .claude/settings.local.json
 .claude
+
+# Json Backups
+.Json_Backup
