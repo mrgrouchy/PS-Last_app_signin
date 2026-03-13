@@ -143,9 +143,9 @@ else {
 # Graph connection
 # ------------------------------------------------------------
 
-$TenantId  = "***REMOVED***"
-$ClientId  = "***REMOVED***"
-$Thumbprint = "***REMOVED***"   # cert must exist in CurrentUser\My or LocalMachine\My
+$TenantId  = ""
+$ClientId  = ""
+$Thumbprint = ""   # cert must exist in CurrentUser\My or LocalMachine\My
 
 Connect-MgGraph -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $Thumbprint -NoWelcome
 
