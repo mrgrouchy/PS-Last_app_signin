@@ -12,10 +12,6 @@ This toolset is **tenant read-only**. It issues only `GET` requests against Micr
 
 Builds a tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion.
 
-### `Tools/Backup-JsonFiles.ps1`
-
-Backs up top-level `.json` files in a directory into a `Json_Backup` folder before bulk changes.
-
 ## `Get-AppUsageReport.ps1`
 
 ### What It Does
@@ -229,24 +225,8 @@ The script enforces this by assigning `RiskLevel = Exempt`, `RecommendedAction =
 - `RecommendedAction` is a starting point for human decision-making, not an automation trigger.
 - Apps with no observed sign-in data can still be live through provisioning, infrequent use, break-glass scenarios, federation, or other out-of-band dependencies.
 
-## `Tools/Backup-JsonFiles.ps1`
-
-### Usage
-
-```powershell
-.\Tools\Backup-JsonFiles.ps1
-.\Tools\Backup-JsonFiles.ps1 -SourceDir "C:\path\to\jsons"
-```
-
-Behavior:
-
-- Copies top-level `.json` files into `Json_Backup`
-- Rotates an existing backup copy by timestamp before overwriting it
-- Does not recurse into subfolders
-
 ## Notes
 
-- These scripts are reporting and helper utilities. They do not directly remove or disable tenant objects.
 - Graph `servicePrincipalSignInActivities` is still the main non-LA signal for service principal activity.
 
 ## License
