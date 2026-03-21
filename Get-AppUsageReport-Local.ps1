@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds an app-usage and dependency report for Entra ID service principals.
+  Builds a local-only, resumable app-usage and dependency report for Entra ID service principals.
 
 .DESCRIPTION
   Collects service principal activity and dependency signals, then outputs a
@@ -8,6 +8,10 @@
   Graph servicePrincipalSignInActivities and, when configured, Log Analytics
   sign-in tables (SigninLogs, AADServicePrincipalSignInLogs,
   AADManagedIdentitySignInLogs).
+
+  Designed for local execution. The script supports resumable processing by
+  writing a run-state checkpoint file and reusing it on the next run when the
+  processing scope and key parameters match.
   
   Note: this repository is sanitized for sharing. Authentication and workspace
   values are redacted and should be supplied in your private environment.
@@ -46,6 +50,19 @@
   If direct SP matching returns no results, the script also attempts fallback
   resolution from app registration object IDs to AppId.
 
+.PARAMETER RunStatePath
+  Optional path to a checkpoint JSON file used for resume-on-failure behavior.
+  If omitted, defaults to:
+  - "<OutCsvFileName>.runstate.json" in the current directory when OutCsv is set
+  - "Get-AppUsageReport.runstate.json" in the current directory otherwise
+
+.PARAMETER NoResume
+  Disables loading an existing run-state file. Processing starts fresh.
+
+.PARAMETER KeepRunState
+  Keeps the run-state file after successful completion. By default, the
+  run-state file is removed when the run completes successfully.
+
 .EXAMPLE
   # Graph only — 180d SP activity, no LA required
   .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv
@@ -65,6 +82,18 @@
 .EXAMPLE
   # Process only the first 200 filtered service principals
   .\Get-AppUsageReport-Local.ps1 -Top 200 -OutCsv .\report.csv
+
+.EXAMPLE
+  # Resume-capable run using explicit checkpoint file
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -RunStatePath .\report.runstate.json
+
+.EXAMPLE
+  # Force fresh run and ignore any previous checkpoint
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -NoResume
+
+.EXAMPLE
+  # Keep checkpoint after a successful run (for audit/troubleshooting)
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -KeepRunState
 #>
 param(
   [int]$UnusedDays    = 180,
