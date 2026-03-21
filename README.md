@@ -10,7 +10,7 @@ This toolset is **tenant read-only**. It issues only `GET` requests against Micr
 
 ### `Get-AppUsageReport-Local.ps1`
 
-Builds a tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion.
+Builds a tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion. It also supports checkpoint-based resume for interrupted local runs.
 
 ## `Get-AppUsageReport-Local.ps1`
 
@@ -27,6 +27,7 @@ Builds a tenant-wide or targeted report that combines sign-in activity, credenti
 - Sub-classifies non-tenant-owned service principals into `MicrosoftFirstParty` and `ConsentedExternalApp`
 - Exempts Microsoft infrastructure SPs from cleanup workflows automatically
 - Produces a conservative `CandidateForDisableReview` flag and a staged `RecommendedAction` instead of a direct disable recommendation
+- Supports run-state checkpointing and resume for long-running reports
 
 ### Prerequisites
 
@@ -82,6 +83,15 @@ That means a `-WorkspaceId` value passed at runtime is overwritten unless you re
 
 # Restrict to a target list
 .\Get-AppUsageReport-Local.ps1 -InputCsv .\targets.csv -OutCsv .\report.csv
+
+# Resume-capable run with explicit checkpoint path
+.\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -RunStatePath .\report.runstate.json
+
+# Force a fresh run and ignore any previous checkpoint
+.\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -NoResume
+
+# Keep checkpoint file after successful completion
+.\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -KeepRunState
 ```
 
 ### Parameters
@@ -95,6 +105,9 @@ That means a `-WorkspaceId` value passed at runtime is overwritten unless you re
 | `-IncludeNeverUsed` | off | Keep rows with no recorded activity in the final report |
 | `-OutCsv` | empty | Export path for the CSV report |
 | `-InputCsv` | empty | Optional CSV used to scope the run |
+| `-RunStatePath` | empty | Optional checkpoint JSON path used to resume interrupted runs |
+| `-NoResume` | off | Ignore existing checkpoint data and start a fresh run |
+| `-KeepRunState` | off | Keep checkpoint file after successful completion (default behavior removes it) |
 
 ### Input CSV Filtering
 
@@ -175,7 +188,7 @@ For this workflow, Log Analytics is the authoritative source for interactive sig
 | SpSubClass | Meaning |
 |---|---|
 | `TenantOwned` | Has a local app registration in this tenant |
-| `MicrosoftFirstParty` | No local app reg; publisher matches Microsoft Services, Microsoft Corporation, Windows Azure, or Microsoft Azure |
+| `MicrosoftFirstParty` | No local app reg; publisher matches Microsoft Services, Microsoft Corporation, Windows Azure, Microsoft Azure, or Microsoft |
 | `ConsentedExternalApp` | No local app reg; publisher is non-Microsoft or absent — a consented ISV or external app |
 
 ### Risk Classification
