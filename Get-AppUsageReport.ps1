@@ -33,6 +33,7 @@
 
 .PARAMETER IncludeNeverUsed
   Include service principals with no recorded sign-in activity at all.
+  Default: enabled. Use -IncludeNeverUsed:$false to exclude never-used apps.
 
 .PARAMETER OutCsv
   Path to export a CSV report. If omitted, no file is written.
@@ -71,7 +72,7 @@ param(
   [string]$WorkspaceId = "",
   [int]$LookbackDays  = 90,
   [int]$Top           = 0,
-  [switch]$IncludeNeverUsed,
+  [switch]$IncludeNeverUsed = $true,
   [string]$OutCsv     = "",
   [string]$InputCsv   = ""
 )

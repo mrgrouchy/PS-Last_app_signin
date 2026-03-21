@@ -10,7 +10,7 @@ This toolset is **tenant read-only**. It issues only `GET` requests against Micr
 
 ### `Get-AppUsageReport.ps1`
 
-Builds a tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion.
+Builds a local, tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion.
 
 ## `Get-AppUsageReport.ps1`
 
@@ -71,17 +71,18 @@ That means a `-WorkspaceId` value passed at runtime is overwritten unless you re
 ### Usage
 
 ```powershell
-# Graph only
+# Graph only (IncludeNeverUsed is enabled by default)
 .\Get-AppUsageReport.ps1 -OutCsv .\report.csv
 
 # Graph + Log Analytics
 .\Get-AppUsageReport.ps1 -WorkspaceId "<guid>" -OutCsv .\report.csv
 
-# Include objects with no observed activity
-.\Get-AppUsageReport.ps1 -IncludeNeverUsed -OutCsv .\report.csv
+# Exclude objects with no observed activity
+.\Get-AppUsageReport.ps1 -IncludeNeverUsed:$false -OutCsv .\report.csv
 
 # Restrict to a target list
 .\Get-AppUsageReport.ps1 -InputCsv .\targets.csv -OutCsv .\report.csv
+
 ```
 
 ### Parameters
@@ -92,7 +93,7 @@ That means a `-WorkspaceId` value passed at runtime is overwritten unless you re
 | `-WorkspaceId` | empty | Optional Log Analytics workspace ID (currently overwritten to empty by an in-script assignment unless you edit the script) |
 | `-LookbackDays` | `90` | Log Analytics query window (use within your workspace retention period) |
 | `-Top` | `0` | Limit the number of service principals processed after filtering |
-| `-IncludeNeverUsed` | off | Keep rows with no recorded activity in the final report |
+| `-IncludeNeverUsed` | on | Keep rows with no recorded activity in the final report (`-IncludeNeverUsed:$false` to exclude) |
 | `-OutCsv` | empty | Export path for the CSV report |
 | `-InputCsv` | empty | Optional CSV used to scope the run |
 
