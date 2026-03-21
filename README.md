@@ -8,11 +8,11 @@ This toolset is **tenant read-only**. It issues only `GET` requests against Micr
 
 ## Scripts
 
-### `Get-AppUsageReport.ps1`
+### `Get-AppUsageReport-Local.ps1`
 
 Builds a tenant-wide or targeted report that combines sign-in activity, credential state, ownership classification, and structural dependency checks. The output is intended to identify candidates for manual disable review, not automatic deletion.
 
-## `Get-AppUsageReport.ps1`
+## `Get-AppUsageReport-Local.ps1`
 
 ### What It Does
 
@@ -72,16 +72,16 @@ That means a `-WorkspaceId` value passed at runtime is overwritten unless you re
 
 ```powershell
 # Graph only
-.\Get-AppUsageReport.ps1 -OutCsv .\report.csv
+.\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv
 
 # Graph + Log Analytics
-.\Get-AppUsageReport.ps1 -WorkspaceId "<guid>" -OutCsv .\report.csv
+.\Get-AppUsageReport-Local.ps1 -WorkspaceId "<guid>" -OutCsv .\report.csv
 
 # Include objects with no observed activity
-.\Get-AppUsageReport.ps1 -IncludeNeverUsed -OutCsv .\report.csv
+.\Get-AppUsageReport-Local.ps1 -IncludeNeverUsed -OutCsv .\report.csv
 
 # Restrict to a target list
-.\Get-AppUsageReport.ps1 -InputCsv .\targets.csv -OutCsv .\report.csv
+.\Get-AppUsageReport-Local.ps1 -InputCsv .\targets.csv -OutCsv .\report.csv
 ```
 
 ### Parameters

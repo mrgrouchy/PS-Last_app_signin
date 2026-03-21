@@ -48,23 +48,23 @@
 
 .EXAMPLE
   # Graph only — 180d SP activity, no LA required
-  .\Get-AppUsageReport.ps1 -OutCsv .\report.csv
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv
 
 .EXAMPLE
   # Graph + Log Analytics (after local private configuration)
-  .\Get-AppUsageReport.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -OutCsv .\report.csv
+  .\Get-AppUsageReport-Local.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -OutCsv .\report.csv
 
 .EXAMPLE
   # Custom thresholds, include never-used apps (after local private configuration)
-  .\Get-AppUsageReport.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
+  .\Get-AppUsageReport-Local.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
 
 .EXAMPLE
   # Filter by specific SP IDs from input CSV
-  .\Get-AppUsageReport.ps1 -InputCsv .\input.csv -OutCsv .\report.csv
+  .\Get-AppUsageReport-Local.ps1 -InputCsv .\input.csv -OutCsv .\report.csv
 
 .EXAMPLE
   # Process only the first 200 filtered service principals
-  .\Get-AppUsageReport.ps1 -Top 200 -OutCsv .\report.csv
+  .\Get-AppUsageReport-Local.ps1 -Top 200 -OutCsv .\report.csv
 #>
 param(
   [int]$UnusedDays    = 180,
@@ -73,7 +73,10 @@ param(
   [int]$Top           = 0,
   [switch]$IncludeNeverUsed,
   [string]$OutCsv     = "",
-  [string]$InputCsv   = ""
+  [string]$InputCsv   = "",
+  [string]$RunStatePath = "",
+  [switch]$NoResume,
+  [switch]$KeepRunState
 )
 
 Set-StrictMode -Version Latest
@@ -336,6 +339,68 @@ function Get-FederatedCredentialInfo {
   }
 }
 
+# ------------------------------------------------------------
+# Resume helpers
+# ------------------------------------------------------------
+
+function Get-RunFingerprint {
+  param(
+    [array]$ServicePrincipals,
+    [int]$UnusedDays,
+    [int]$LookbackDays,
+    [int]$Top,
+    [bool]$IncludeNeverUsed,
+    [bool]$UseLA
+  )
+
+  $ids = @(
+    $ServicePrincipals |
+      ForEach-Object { Get-Prop $_ "id" } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object
+  )
+
+  $signature = [pscustomobject]@{
+    ServicePrincipalIds = $ids
+    UnusedDays          = $UnusedDays
+    LookbackDays        = $LookbackDays
+    Top                 = $Top
+    IncludeNeverUsed    = $IncludeNeverUsed
+    UseLA               = $UseLA
+  } | ConvertTo-Json -Depth 6 -Compress
+
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($signature)
+    $hashBytes = $sha.ComputeHash($bytes)
+    return ([System.BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant()
+  }
+  finally {
+    $sha.Dispose()
+  }
+}
+
+function Save-RunCheckpoint {
+  param(
+    [string]$Path,
+    [string]$Fingerprint,
+    [int]$Total,
+    [hashtable]$ProcessedMap,
+    [array]$Rows
+  )
+
+  $state = [pscustomobject]@{
+    Version                = 1
+    SavedAtUtc             = (Get-Date).ToUniversalTime().ToString("o")
+    Fingerprint            = $Fingerprint
+    TotalServicePrincipals = $Total
+    ProcessedServicePrincipalIds = @($ProcessedMap.Keys | Sort-Object)
+    ReportRows             = @($Rows)
+  }
+
+  $state | ConvertTo-Json -Depth 12 | Set-Content -Path $Path -Encoding UTF8
+}
+
 # ============================================================
 # DATA COLLECTION
 # ============================================================
@@ -487,8 +552,44 @@ if ($hasInputFilter -and $servicePrincipals.Count -eq 0 -and ($filterSpObjectIds
 $cutoff = (Get-Date).ToUniversalTime().AddDays(-$UnusedDays)
 $now    = Get-Date
 
+$defaultStateName = if ($OutCsv) {
+  "{0}.runstate.json" -f [System.IO.Path]::GetFileName($OutCsv)
+} else {
+  "Get-AppUsageReport.runstate.json"
+}
+if ([string]::IsNullOrWhiteSpace($RunStatePath)) {
+  $RunStatePath = Join-Path -Path $PWD -ChildPath $defaultStateName
+}
+
+$runFingerprint = Get-RunFingerprint -ServicePrincipals @($servicePrincipals) -UnusedDays $UnusedDays -LookbackDays $LookbackDays -Top $Top -IncludeNeverUsed ([bool]$IncludeNeverUsed) -UseLA ([bool]$useLA)
+$processedIds = @{}
+$reportRows = @()
+
+if (-not $NoResume -and (Test-Path -LiteralPath $RunStatePath)) {
+  try {
+    $existingState = Get-Content -LiteralPath $RunStatePath -Raw | ConvertFrom-Json
+    if ($existingState -and $existingState.Fingerprint -eq $runFingerprint) {
+      foreach ($id in @($existingState.ProcessedServicePrincipalIds)) {
+        if ($id) { $processedIds[[string]$id] = $true }
+      }
+      $reportRows = @($existingState.ReportRows)
+      Write-Host "Resuming from run-state: $RunStatePath ($($processedIds.Count)/$($servicePrincipals.Count) already processed)" -ForegroundColor Yellow
+    }
+    else {
+      Write-Warning "Existing run-state file does not match current scope/parameters. Starting a fresh run."
+    }
+  }
+  catch {
+    Write-Warning "Could not load run-state file '$RunStatePath': $_`nStarting a fresh run."
+  }
+}
+elseif (-not $NoResume) {
+  Write-Host "Run-state enabled: $RunStatePath" -ForegroundColor DarkGray
+}
+
 $i = 0
-$report = foreach ($sp in $servicePrincipals) {
+$saveEvery = 1
+foreach ($sp in $servicePrincipals) {
 
   $i++
   $spName = Get-Prop $sp "displayName"
@@ -496,6 +597,9 @@ $report = foreach ($sp in $servicePrincipals) {
 
   $spAppId        = Get-Prop $sp "appId"
   $spId           = Get-Prop $sp "id"
+  if ($spId -and $processedIds.ContainsKey($spId)) {
+    continue
+  }
   $spType         = Get-Prop $sp "servicePrincipalType"
   $spIsDisabledRaw = Get-Prop $sp "isDisabled"
   $spIsDisabled    = $null
@@ -704,7 +808,7 @@ $report = foreach ($sp in $servicePrincipals) {
     'Review'
   }
 
-  [pscustomobject]@{
+  $row = [pscustomobject]@{
     DisplayName              = $spName
     AppId                    = $spAppId
     AppRegistrationObjectId  = $appRegObjectId
@@ -749,9 +853,23 @@ $report = foreach ($sp in $servicePrincipals) {
     RecommendedAction        = $recommendedAction
     DependencySignals        = ($depReasons -join ";")
   }
+
+  $reportRows += $row
+  if ($spId) {
+    $processedIds[$spId] = $true
+  }
+
+  if (($processedIds.Count % $saveEvery) -eq 0 -or $processedIds.Count -eq $servicePrincipals.Count) {
+    Save-RunCheckpoint -Path $RunStatePath -Fingerprint $runFingerprint -Total $servicePrincipals.Count -ProcessedMap $processedIds -Rows $reportRows
+  }
 }
 
 Write-Progress -Activity "Building report" -Completed
+
+$report = @($reportRows)
+if (-not $KeepRunState -and (Test-Path -LiteralPath $RunStatePath)) {
+  Remove-Item -LiteralPath $RunStatePath -Force -ErrorAction SilentlyContinue
+}
 
 # ------------------------------------------------------------
 # Filter + sort
