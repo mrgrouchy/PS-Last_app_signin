@@ -4,6 +4,7 @@ PowerShell scripts for reviewing Entra ID applications and service principals du
 
 - `Get-AppUsageReport.ps1`: tenant-wide or targeted usage/dependency report
 - `Get-AppUsageReport-Local.ps1`: the same report with resumable local checkpointing
+- `Report-DisabledAppReg.ps1`: disabled app-registration tracker with optional Log Analytics enrichment and HTML reporting
 - `Export-DisabledEntraApplicationsArchive.ps1`: JSON-first archive of disabled applications for later reference or partial recreation
 
 ## What These Scripts Do
@@ -127,6 +128,38 @@ Parameters:
 | `-OutDir` | `.\disabled-app-archive` | Archive root |
 | `-IncludeServicePrincipalDisabled` | off | Also include apps with disabled related service principals |
 
+### `Report-DisabledAppReg.ps1`
+
+Tracks disabled app registrations over time in a local JSON file and can optionally enrich the tracker with attempted sign-in data from Log Analytics.
+
+Key behavior:
+
+- fetches disabled applications from Graph
+- records `firstSeen` the first time a disabled app is observed
+- refreshes `lastSeen` on later runs without overwriting `firstSeen`
+- optionally queries Log Analytics for attempted interactive, non-interactive, and service principal sign-ins
+- can export the tracker to CSV
+- can generate an HTML report under a dated `reports` folder
+
+Typical usage:
+
+```powershell
+.\Report-DisabledAppReg.ps1
+.\Report-DisabledAppReg.ps1 -OutCsv .\disabled-apps.csv
+.\Report-DisabledAppReg.ps1 -HtmlReport
+.\Report-DisabledAppReg.ps1 -UseLA
+```
+
+Parameters:
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `-JsonPath` | `.\disabled-apps-tracker.json` | Tracker JSON path |
+| `-UseLA` | off | Enables Log Analytics enrichment |
+| `-LookbackDays` | `90` | Fallback window for apps without `firstSeen` |
+| `-OutCsv` | empty | Optional CSV export |
+| `-HtmlReport` | off | Write an HTML report under `.\reports\<yyyyMMdd>\` |
+
 ## Input CSV Support
 
 Both reporting scripts support CSV scoping and detect common ID columns automatically.
@@ -222,6 +255,7 @@ This repository is sanitized. Values such as tenant ID, client ID, certificate t
 Current behavior:
 
 - `Get-AppUsageReport.ps1` and `Get-AppUsageReport-Local.ps1` expect the in-script `Connect-MgGraph -TenantId ... -ClientId ... -CertificateThumbprint ...` block to be populated in your private copy
+- `Report-DisabledAppReg.ps1` currently uses interactive `Connect-MgGraph -Scopes "Application.ReadWrite.All"` and its hardcoded `WorkspaceId` is intentionally redacted in the shared repo
 - `Export-DisabledEntraApplicationsArchive.ps1` first checks `Get-MgContext`; if Graph is already connected it reuses that session, otherwise it falls back to interactive sign-in when no app certificate values are set
 
 There is also an important current quirk in both reporting scripts:
@@ -232,6 +266,8 @@ $WorkspaceId = ""
 ```
 
 That line overwrites any `-WorkspaceId` value passed on the command line unless you remove or change it in your private copy.
+
+`Report-DisabledAppReg.ps1` behaves similarly for Log Analytics: its shared copy intentionally sets the hardcoded `WorkspaceId` to an empty redacted value, so `-UseLA` requires you to populate that privately first.
 
 ## Prerequisites
 
