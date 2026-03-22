@@ -20,9 +20,10 @@
     Path to the JSON tracker file. Default: .\disabled-apps-tracker.json
 
 .PARAMETER UseLA
-    Enable Log Analytics queries for attempted sign-ins. In the shared repo,
-    the hardcoded WorkspaceId is intentionally redacted and must be populated
-    privately before this mode will return Log Analytics data.
+    Enable Log Analytics queries for attempted sign-ins. Requires -WorkspaceId.
+
+.PARAMETER WorkspaceId
+    Log Analytics workspace ID for sign-in queries.
 
 .PARAMETER LookbackDays
     Fallback lookback window (days) if an app has no firstSeen date in JSON. Default: 90.
@@ -333,7 +334,6 @@ union isfuzzy=true
 Connect-MgGraph -Scopes "Application.ReadWrite.All" | Out-Null
 
 # Hardcoded Log Analytics workspace
-# Intentionally redacted in the shared repo. Set privately in your local copy if -UseLA is required.
 $WorkspaceId = ""
 
 # Connect to Log Analytics if switched on
