@@ -580,8 +580,8 @@ if ($hasInputFilter -and $servicePrincipals.Count -eq 0 -and ($filterSpObjectIds
 # BUILD REPORT
 # ============================================================
 
-$cutoff = (Get-Date).ToUniversalTime().AddDays(-$UnusedDays)
 $now    = Get-Date
+$nowUtc = $now.ToUniversalTime()
 
 $defaultStateName = if ($OutCsv) {
   "{0}.runstate.json" -f [System.IO.Path]::GetFileName($OutCsv)
@@ -686,7 +686,7 @@ foreach ($sp in $servicePrincipals) {
   ) | Where-Object { $null -ne $_ }
 
   $trueLastActivity = if ($allDates) { ($allDates | Sort-Object -Descending | Select-Object -First 1) } else { $null }
-  $daysSince        = if ($trueLastActivity) { [int]($now - $trueLastActivity).TotalDays } else { $null }
+  $daysSince        = if ($trueLastActivity) { [int]($nowUtc - $trueLastActivity.ToUniversalTime()).TotalDays } else { $null }
 
   # --- App registration: created date + credentials ---
   $appReg         = $appRegByAppId[$spAppId]
@@ -772,15 +772,16 @@ foreach ($sp in $servicePrincipals) {
 
   # --- Risk level (activity + credential liveness) ---
   $tooNew = $null -ne $createdDaysAgo -and $createdDaysAgo -lt 30
+  $isActiveByUsage = $null -ne $daysSince -and $daysSince -lt $UnusedDays
 
-  $riskLevel = if ($spSubClass -eq 'MicrosoftFirstParty') {
+  $riskLevel = if ($isActiveByUsage) {
+    "Active"
+  } elseif ($spSubClass -eq 'MicrosoftFirstParty') {
     "Exempt"
   } elseif ($spSubClass -eq 'ConsentedExternalApp') {
     "Review"
   } elseif ($tooNew) {
     "Ignore"
-  } elseif ($trueLastActivity -and $trueLastActivity -ge $cutoff) {
-    "Active"
   } elseif ($false -eq $effectiveAccountEnabled) {
     "Low"
   } elseif (($hasSecrets -and $secretExpired -and -not $hasCerts) -or
