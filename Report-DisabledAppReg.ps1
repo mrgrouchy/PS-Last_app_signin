@@ -236,7 +236,13 @@ function Get-AllDisabledApplications {
         if ($resp.value) { $all += $resp.value }
 
         # Paging
-        $uri = $resp.'@odata.nextLink'
+        if ($resp -is [System.Collections.IDictionary]) {
+            $uri = $resp['@odata.nextLink']
+        }
+        else {
+            $next = $resp.PSObject.Properties['@odata.nextLink']
+            $uri = if ($next) { $next.Value } else { $null }
+        }
     } while ($uri)
 
     return $all
