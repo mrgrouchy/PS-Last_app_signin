@@ -972,8 +972,10 @@ foreach ($sp in $servicePrincipals) {
   # Read it together with RiskLevel and DependencySignals:
   # - Exempt: Microsoft first-party SP; do not target for cleanup from this report.
   # - NoAction: still active or too new; keep monitoring instead of changing anything.
-  # - RevokeGrants: consented external app with no dependency signals beyond NonTenantOwned;
-  #   prefer reviewing/removing tenant consent rather than disabling a non-tenant-owned app.
+  # - RevokeGrants: external app with actual OAuth/app-role grant signals; review/removing
+  #   those grants is a better first step than disabling the enterprise app blindly.
+  # - DisableSPReview: no dependency signals that require a grant-focused path; use normal
+  #   enterprise app disable review, especially for external apps that have no real grants.
   # - DisableSP: tenant-owned app with no dependency signals; strongest cleanup candidate,
   #   but still intended for staged disable review rather than direct deletion.
   # - ReviewDependencies: one or more dependency signals exist; inspect what relies on the
@@ -983,10 +985,17 @@ foreach ($sp in $servicePrincipals) {
   } elseif ($riskLevel -in @("Active", "Ignore")) {
     'NoAction'
   } elseif ($spSubClass -eq 'ConsentedExternalApp') {
-    if ($depReasons | Where-Object { $_ -notin @('NonTenantOwned') }) {
+    $hasGrantSignals = ($oauthClient -gt 0) -or ($oauthResource -gt 0) -or ($roleAssignments -gt 0)
+    $hasNonGrantDependencySignals = $depReasons | Where-Object {
+      $_ -notin @('NonTenantOwned', 'OAuthClientGrants', 'OAuthResourceGrants', 'AppRoleAssignments')
+    }
+
+    if ($hasNonGrantDependencySignals) {
       'ReviewDependencies'
-    } else {
+    } elseif ($hasGrantSignals) {
       'RevokeGrants'
+    } else {
+      'DisableSPReview'
     }
   } elseif ($spSubClass -eq 'TenantOwned') {
     if ($depReasons.Count -eq 0) {
@@ -996,6 +1005,16 @@ foreach ($sp in $servicePrincipals) {
     }
   } else {
     'Review'
+  }
+
+  $recommendedActionReason = switch ($recommendedAction) {
+    'Exempt' { 'Microsoft first-party service principal.' }
+    'NoAction' { 'Still active or too new for unused-app review.' }
+    'RevokeGrants' { 'External app has OAuth or app-role grant signals.' }
+    'DisableSPReview' { 'No grant or other dependency signals found for this external app.' }
+    'DisableSP' { 'Tenant-owned app has no dependency signals.' }
+    'ReviewDependencies' { 'Dependency signals were found and should be reviewed first.' }
+    default { 'Manual review required.' }
   }
 
   $row = [pscustomobject]@{
@@ -1041,6 +1060,7 @@ foreach ($sp in $servicePrincipals) {
     RiskLevel                = $riskLevel
     CandidateForDisableReview = $candidateForDisableReview
     RecommendedAction        = $recommendedAction
+    RecommendedActionReason  = $recommendedActionReason
     DependencySignals        = ($depReasons -join ";")
   }
 
