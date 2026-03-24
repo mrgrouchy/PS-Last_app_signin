@@ -11,8 +11,11 @@
 
   Designed for local execution. The script supports resumable processing by
   writing a run-state checkpoint file and reusing it on the next run when the
-  processing scope and key parameters match.
-  
+  processing scope and key parameters match. For authentication, the script
+  first reuses an existing working Microsoft Graph session when present, then
+  tries app-certificate auth when configured, and otherwise falls back to
+  interactive Graph sign-in for local testing.
+
   Note: this repository is sanitized for sharing. Authentication and workspace
   values are redacted and should be supplied in your private environment.
 
@@ -24,9 +27,9 @@
   When enabled in your local/private copy, queries SigninLogs,
   AADServicePrincipalSignInLogs, and AADManagedIdentitySignInLogs
   (isfuzzy=true, missing tables skipped). Omit for Graph-only operation.
-  In this sanitized shared script, the parameter value is reset in-code unless
-  you customize that section locally, so passing -WorkspaceId alone is not
-  sufficient in the shared copy.
+  In this sanitized shared script, the in-code workspace value is intentionally
+  reset unless you customize that section locally, so passing -WorkspaceId
+  alone is not sufficient in the shared copy.
 
 .PARAMETER LookbackDays
   How far back to query Log Analytics. Should not exceed your workspace
@@ -60,7 +63,8 @@
   - "Get-AppUsageReport.runstate.json" in the current directory otherwise
 
 .PARAMETER NoResume
-  Disables loading an existing run-state file. Processing starts fresh.
+  Disables loading an existing run-state file. Processing starts fresh, but the
+  script still writes a new run-state checkpoint during the current run.
 
 .PARAMETER KeepRunState
   Deprecated compatibility switch. Run-state is retained for same-day reruns
@@ -210,6 +214,11 @@ else {
 # Graph connection
 # ------------------------------------------------------------
 
+# TODO(AzureAutomation): replace this local certificate-based Graph auth block with a shared auth helper.
+# For Azure Automation, prefer Connect-MgGraph via managed identity if the required Graph app roles are assigned.
+# Example future shape:
+# - local/dev: existing cert or interactive login
+# - automation: Connect-MgGraph -Identity
 $TenantId  = ""
 $ClientId  = ""
 $Thumbprint = ""   # cert must exist in CurrentUser\My or LocalMachine\My
@@ -257,6 +266,9 @@ if (-not $usingExistingGraph) {
 # Az connection (only when WorkspaceId supplied)
 # ------------------------------------------------------------
 
+# TODO(AzureAutomation): align Az auth with the Graph auth strategy.
+# If WorkspaceId / Log Analytics is kept for scheduled runs, prefer Connect-AzAccount -Identity in Azure Automation.
+# Also remove the current WorkspaceId overwrite pattern so runtime configuration can be supplied externally.
 $useLA = ($WorkspaceId -ne "")
 
 if ($useLA) {
@@ -479,7 +491,31 @@ function Save-RunCheckpoint {
     ReportRows             = @($Rows)
   }
 
-  $state | ConvertTo-Json -Depth 12 | Set-Content -Path $Path -Encoding UTF8
+  $json    = $state | ConvertTo-Json -Depth 12
+  $tmpPath = "$Path.tmp"
+
+  # Write to a temp file first so OneDrive never locks the live checkpoint during the write.
+  Set-Content -Path $tmpPath -Value $json -Encoding UTF8
+
+  # Rename over the real file with exponential-backoff retries (handles brief OneDrive sync locks).
+  $maxRetries = 6
+  $delayMs    = 500
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      Move-Item -LiteralPath $tmpPath -Destination $Path -Force -ErrorAction Stop
+      return
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        Write-Verbose "Checkpoint rename attempt $attempt failed – retrying in ${delayMs} ms..."
+        Start-Sleep -Milliseconds $delayMs
+        $delayMs *= 2
+      } else {
+        Write-Warning "Could not save checkpoint after $maxRetries attempts: $_"
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
 }
 
 # ============================================================
@@ -657,7 +693,32 @@ $reportRows = @()
 
 if (-not $NoResume -and (Test-Path -LiteralPath $RunStatePath)) {
   try {
-    $existingState = Get-Content -LiteralPath $RunStatePath -Raw | ConvertFrom-Json
+    # Open with FileShare.ReadWrite so we can read even while OneDrive holds the file open.
+    $existingState = $null
+    $readRetries   = 4
+    $readDelayMs   = 750
+    for ($rAttempt = 1; $rAttempt -le $readRetries; $rAttempt++) {
+      try {
+        $fs     = [System.IO.File]::Open($RunStatePath,
+                      [System.IO.FileMode]::Open,
+                      [System.IO.FileAccess]::Read,
+                      [System.IO.FileShare]::ReadWrite)
+        $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+        $raw    = $reader.ReadToEnd()
+        $reader.Dispose(); $fs.Dispose()
+        $existingState = $raw | ConvertFrom-Json
+        break
+      }
+      catch {
+        if ($rAttempt -lt $readRetries) {
+          Write-Verbose "Checkpoint read attempt $rAttempt failed – retrying in ${readDelayMs} ms..."
+          Start-Sleep -Milliseconds $readDelayMs
+          $readDelayMs *= 2
+        } else {
+          throw
+        }
+      }
+    }
     $todayLocal = (Get-Date).ToString("yyyy-MM-dd")
     $stateLocalDate = $null
 
