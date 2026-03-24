@@ -214,11 +214,6 @@ else {
 # Graph connection
 # ------------------------------------------------------------
 
-# TODO(AzureAutomation): replace this local certificate-based Graph auth block with a shared auth helper.
-# For Azure Automation, prefer Connect-MgGraph via managed identity if the required Graph app roles are assigned.
-# Example future shape:
-# - local/dev: existing cert or interactive login
-# - automation: Connect-MgGraph -Identity
 $TenantId  = ""
 $ClientId  = ""
 $Thumbprint = ""   # cert must exist in CurrentUser\My or LocalMachine\My
@@ -266,9 +261,6 @@ if (-not $usingExistingGraph) {
 # Az connection (only when WorkspaceId supplied)
 # ------------------------------------------------------------
 
-# TODO(AzureAutomation): align Az auth with the Graph auth strategy.
-# If WorkspaceId / Log Analytics is kept for scheduled runs, prefer Connect-AzAccount -Identity in Azure Automation.
-# Also remove the current WorkspaceId overwrite pattern so runtime configuration can be supplied externally.
 $useLA = ($WorkspaceId -ne "")
 
 if ($useLA) {
