@@ -4,6 +4,7 @@
 *.json
 *.xml
 *.log
+*.docx
 
 # PowerShell transcript files
 *_transcript.txt
@@ -38,3 +39,6 @@ reports/
 
 # ALM
 ALM/
+
+# Docs
+Docs/
