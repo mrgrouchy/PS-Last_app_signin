@@ -80,12 +80,14 @@ Extra behavior compared with `Get-AppUsageReport.ps1`:
 
 - writes a run-state JSON file while processing
 - lets you control how often the checkpoint file is updated with `-CheckpointInterval`
+- writes checkpoints through a temp-file replace flow with retries to reduce OneDrive/file-lock issues during long local runs
 - if `-OutCsv` is omitted, writes `.\Get-AppUsageReport-<yyyy-MM-dd>.csv`
 - on same-day reruns, prompts to reuse or delete the existing checkpoint (default behavior)
 - automatically deletes prior-day checkpoints and starts a fresh iteration
 - resumes when the same scope and key parameters are detected
 - supports explicit checkpoint path control
 - supports non-interactive same-day action selection (`Prompt`, `Reuse`, `Delete`)
+- reduces local run overhead by throttling progress updates and avoiding repeated array-copy growth during report construction
 
 Typical usage:
 
