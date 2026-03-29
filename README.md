@@ -140,6 +140,7 @@ Key behavior:
 - fetches disabled applications from Graph
 - records `firstSeen` the first time a disabled app is observed
 - refreshes `lastSeen` on later runs without overwriting `firstSeen`
+- writes newly discovered disabled apps to the tracker before any optional Log Analytics lookup so first-run attempted sign-in checks start from the recorded `firstSeen`
 - optionally queries Log Analytics for attempted interactive, non-interactive, and service principal sign-ins
 - can export the tracker to CSV
 - can generate an HTML report under a dated `reports` folder
@@ -159,7 +160,7 @@ Parameters:
 |---|---|---|
 | `-JsonPath` | `.\disabled-apps-tracker.json` | Tracker JSON path |
 | `-UseLA` | off | Enables Log Analytics enrichment |
-| `-LookbackDays` | `90` | Fallback window for apps without `firstSeen` |
+| `-LookbackDays` | `90` | Fallback window only for apps without `firstSeen` |
 | `-OutCsv` | empty | Optional CSV export |
 | `-HtmlReport` | off | Write an HTML report under `.\reports\<yyyyMMdd>\` |
 

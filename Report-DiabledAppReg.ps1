@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Tracks disabled Entra application registrations, records when they were first observed disabled, and can enrich the tracker with attempted sign-in activity.
+    Tracks Azure AD / Entra applications that are disabled, records when they were first observed disabled, and seeds new disabled apps into the JSON tracker before any optional Log Analytics sign-in lookup.
 
 .DESCRIPTION
     Creates/updates a JSON file in the working directory:
@@ -9,35 +9,33 @@
       - Does not overwrite firstSeen
 
     When -UseLA is specified, queries Log Analytics for attempted sign-ins starting from each app's
-    firstSeen date in the JSON (not a fixed 30-day window). -LookbackDays is only used as a fallback
-    for apps without a firstSeen entry.
-
-    The script can also export the tracked data to CSV and generate an HTML report grouped by
-    applications with and without attempted sign-in activity.
+    firstSeen date in the JSON (not a fixed 30-day window). Newly discovered disabled apps are
+    written to the JSON tracker before Log Analytics is queried so first-run attempted sign-in
+    checks also start from the recorded firstSeen timestamp. -LookbackDays is only used as a
+    fallback for apps without a firstSeen entry.
 
 .REQUIREMENTS
     Microsoft Graph PowerShell SDK
-    Permissions: Application.ReadWrite.All
+    Permissions: Application.ReadWrite.All (as per your example)
 
 .PARAMETER JsonPath
-    Path to the JSON tracker file used to persist disabled application history.
-    Default: .\disabled-apps-tracker.json
+    Path to the JSON tracker file. Default: .\disabled-apps-tracker.json
 
 .PARAMETER UseLA
-    Enable Log Analytics queries for attempted sign-ins for currently disabled apps.
-    In the shared/sanitized script, this relies on the redacted WorkspaceId placeholder in the script.
-    Replace it locally before use. Queries start from each app's firstSeen date where available.
+    Enable Log Analytics queries for attempted sign-ins. Requires -WorkspaceId.
+
+.PARAMETER WorkspaceId
+    Log Analytics workspace ID for sign-in queries.
 
 .PARAMETER LookbackDays
-    Fallback lookback window in days used only when an app has no firstSeen date in the JSON tracker.
-    Default: 90.
+    Fallback lookback window (days) if an app has no firstSeen date in JSON. Default: 90.
     Apps WITH firstSeen will query from that date regardless of this parameter.
 
 .PARAMETER OutCsv
-    Optional path for exporting the tracker contents to CSV.
+    Path to export tracker items as CSV.
 
 .PARAMETER HtmlReport
-    Generate an HTML report under .\reports\<yyyyMMdd>\ in the current working directory.
+    Generate an HTML report in the current directory.
 #>
 
 ## todo: once a week backup the json to \backup force with a switch
@@ -384,13 +382,13 @@ union isfuzzy=true
 Connect-MgGraph -Scopes "Application.ReadWrite.All" | Out-Null
 
 # Hardcoded Log Analytics workspace
-$WorkspaceId = "<REDACTED-WORKSPACE-ID>"
+$WorkspaceId = "<Redacted>"
 
 # Connect to Log Analytics if switched on
 $useLA = $UseLA.IsPresent
 
 if ($useLA) {
-    Write-Host "Log Analytics enabled (WorkspaceId configured locally) — will query attempted sign-ins from each app's firstSeen date (fallback: $LookbackDays days)." -ForegroundColor Cyan
+    Write-Host "Log Analytics enabled (WorkspaceId: $WorkspaceId) — will query attempted sign-ins from each app's firstSeen date (fallback: $LookbackDays days)." -ForegroundColor Cyan
     Connect-AzAccount | Out-Null
 }
 
@@ -419,6 +417,45 @@ foreach ($item in $store.items) {
 # Get disabled apps from Graph
 $apps = Get-AllDisabledApplications
 
+# Timestamp for this run
+$now = (Get-Date).ToString("o")
+
+$newCount = 0
+$updatedCount = 0
+$newlyAddedAppIds = @{}
+
+# Seed tracker with any newly discovered disabled apps before LA lookups so
+# firstSeen is available as the lower bound for attempted sign-in queries.
+foreach ($app in $apps) {
+    $appId = $app.appId
+    if (-not $appId) { continue }
+
+    if (-not $index.ContainsKey($appId)) {
+        $entry = [pscustomobject]@{
+            displayName = $app.displayName
+            appId       = $appId
+            objectId    = $app.id
+            isDisabled  = $app.isDisabled
+            firstSeen   = $now
+            lastSeen    = $now
+            lastAttemptedInteractiveSignIn      = $null
+            lastAttemptedNonInteractiveSignIn   = $null
+            lastAttemptedServicePrincipalSignIn = $null
+            lastAttemptedAnySignIn              = $null
+            attemptedInteractiveCount           = 0
+            attemptedNonInteractiveCount        = 0
+            attemptedServicePrincipalCount      = 0
+            attemptedSignInHitCount             = 0
+            latestCorrelationIds                = @()
+        }
+
+        $store.items.Add($entry)
+        $index[$appId] = $entry
+        $newlyAddedAppIds[$appId] = $true
+        $newCount++
+    }
+}
+
 # Query attempted sign-ins for disabled apps (user + SP)
 $signInByAppId = @{}
 if ($useLA -and $apps.Count -gt 0) {
@@ -434,12 +471,6 @@ if ($useLA -and $apps.Count -gt 0) {
     $signInByAppId = Get-SignInStatsByAppId -WorkspaceId $WorkspaceId -AppInfos @($appInfos) -LookbackDays $LookbackDays
     Write-Host "  Sign-in stats for $($signInByAppId.Count) apps" -ForegroundColor Gray
 }
-
-# Timestamp for this run
-$now = (Get-Date).ToString("o")
-
-$newCount = 0
-$updatedCount = 0
 
 foreach ($app in $apps) {
 
@@ -479,63 +510,38 @@ foreach ($app in $apps) {
     }
 
     $hasAttemptsThisRun = ($countInteractive -gt 0) -or ($countNonInteractive -gt 0) -or ($countServicePrincipal -gt 0)
-    if (-not $index.ContainsKey($appId)) {
-        # First time we've seen this app disabled → add with firstSeen
-        $entry = [pscustomobject]@{
-            displayName = $displayName
-            appId       = $appId
-            objectId    = $objectId
-            isDisabled  = $isDisabled
-            firstSeen   = $now
-            lastSeen    = $now
-            lastAttemptedInteractiveSignIn     = $lastInteractive
-            lastAttemptedNonInteractiveSignIn  = $lastNonInteractive
-            lastAttemptedServicePrincipalSignIn = $lastServicePrincipal
-            lastAttemptedAnySignIn             = $lastAttemptedAny
-            attemptedInteractiveCount          = $countInteractive
-            attemptedNonInteractiveCount       = $countNonInteractive
-            attemptedServicePrincipalCount     = $countServicePrincipal
-            attemptedSignInHitCount             = $(if ($hasAttemptsThisRun) { 1 } else { 0 })
-            latestCorrelationIds               = @($correlationIds)
-        }
-
-        $store.items.Add($entry)
-        $index[$appId] = $entry
-
-        $newCount++
+    # Already tracked or seeded above → update lastSeen (do NOT overwrite firstSeen)
+    $existing = $index[$appId]
+    # Pre-ensure all properties exist once
+    if (-not $existing.PSObject.Properties['lastAttemptedInteractiveSignIn']) {
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedInteractiveSignIn' -Value $null
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedNonInteractiveSignIn' -Value $null
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedServicePrincipalSignIn' -Value $null
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedAnySignIn' -Value $null
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedInteractiveCount' -Value 0
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedNonInteractiveCount' -Value 0
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedServicePrincipalCount' -Value 0
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedSignInHitCount' -Value 0
+        Add-Member -InputObject $existing -MemberType NoteProperty -Name 'latestCorrelationIds' -Value @()
     }
-    else {
-        # Already tracked → update lastSeen (do NOT overwrite firstSeen)
-        $existing = $index[$appId]
-        # Pre-ensure all properties exist once
-        if (-not $existing.PSObject.Properties['lastAttemptedInteractiveSignIn']) {
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedInteractiveSignIn' -Value $null
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedNonInteractiveSignIn' -Value $null
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedServicePrincipalSignIn' -Value $null
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'lastAttemptedAnySignIn' -Value $null
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedInteractiveCount' -Value 0
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedNonInteractiveCount' -Value 0
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedServicePrincipalCount' -Value 0
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'attemptedSignInHitCount' -Value 0
-            Add-Member -InputObject $existing -MemberType NoteProperty -Name 'latestCorrelationIds' -Value @()
-        }
-        $existing.displayName = $displayName
-        $existing.objectId    = $objectId
-        $existing.isDisabled  = $isDisabled
-        $existing.lastSeen    = $now
-        $existing.lastAttemptedInteractiveSignIn     = $lastInteractive
-        $existing.lastAttemptedNonInteractiveSignIn  = $lastNonInteractive
-        $existing.lastAttemptedServicePrincipalSignIn = $lastServicePrincipal
-        $existing.lastAttemptedAnySignIn             = $lastAttemptedAny
-        $existing.attemptedInteractiveCount          = $countInteractive
-        $existing.attemptedNonInteractiveCount       = $countNonInteractive
-        $existing.attemptedServicePrincipalCount     = $countServicePrincipal
-        $existing.latestCorrelationIds               = @($correlationIds)
-        if ($hasAttemptsThisRun) {
-            $currentCount = if ($null -ne $existing.attemptedSignInHitCount) { [int]$existing.attemptedSignInHitCount } else { 0 }
-            $existing.attemptedSignInHitCount = $currentCount + 1
-        }
+    $existing.displayName = $displayName
+    $existing.objectId    = $objectId
+    $existing.isDisabled  = $isDisabled
+    $existing.lastSeen    = $now
+    $existing.lastAttemptedInteractiveSignIn     = $lastInteractive
+    $existing.lastAttemptedNonInteractiveSignIn  = $lastNonInteractive
+    $existing.lastAttemptedServicePrincipalSignIn = $lastServicePrincipal
+    $existing.lastAttemptedAnySignIn             = $lastAttemptedAny
+    $existing.attemptedInteractiveCount          = $countInteractive
+    $existing.attemptedNonInteractiveCount       = $countNonInteractive
+    $existing.attemptedServicePrincipalCount     = $countServicePrincipal
+    $existing.latestCorrelationIds               = @($correlationIds)
+    if ($hasAttemptsThisRun) {
+        $currentCount = if ($null -ne $existing.attemptedSignInHitCount) { [int]$existing.attemptedSignInHitCount } else { 0 }
+        $existing.attemptedSignInHitCount = $currentCount + 1
+    }
 
+    if (-not $newlyAddedAppIds.ContainsKey($appId)) {
         $updatedCount++
     }
 }
