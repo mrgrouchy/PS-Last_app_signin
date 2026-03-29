@@ -549,20 +549,10 @@ foreach ($app in $apps) {
 # Save JSON store
 Set-JsonStore -Path $JsonPath -Store $store
 
-# Output summary
-write-host ""
-Write-Host "Disabled apps returned by Graph: $($apps.Count)"
-Write-Host "New entries added (firstSeen recorded): $newCount"
-Write-Host "Existing entries updated (lastSeen refreshed): $updatedCount"
-#Write-Host "Tracker file: $JsonPath"
-
-if ($useLA) {
-    $appsWithAttempts = $store.items | Where-Object { $_.lastAttemptedAnySignIn }
-    Write-Host "Apps with attempted sign-ins (last $LookbackDays days): $($appsWithAttempts.Count)"
-}
-
 # Optional: show current disabled set
-$apps | Select-Object displayName, appId, id, isDisabled
+Write-Host ""
+Write-Host "Current disabled applications" -ForegroundColor Cyan
+$apps | Select-Object displayName, appId, id, isDisabled | Format-Table -AutoSize | Out-Host
 
 if ($OutCsv) {
     $store.items | Export-Csv -Path $OutCsv -NoTypeInformation
@@ -577,4 +567,16 @@ if ($HtmlReport) {
     $HtmlPath = Join-Path -Path $reportDayFolder -ChildPath ("DisabledApps_Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').html")
     New-DisabledAppsHtmlReport -Items $store.items -OutputPath $HtmlPath
     Write-Host "HTML report exported to $HtmlPath" -ForegroundColor Green
+}
+
+# Output summary at the end so it remains visible after long app listings.
+Write-Host ""
+Write-Host "Run summary" -ForegroundColor Cyan
+Write-Host "Disabled apps returned by Graph: $($apps.Count)" -ForegroundColor White
+Write-Host "New entries added (firstSeen recorded): $newCount" -ForegroundColor Green
+Write-Host "Existing entries updated (lastSeen refreshed): $updatedCount" -ForegroundColor Yellow
+
+if ($useLA) {
+    $appsWithAttempts = $store.items | Where-Object { $_.lastAttemptedAnySignIn }
+    Write-Host "Apps with attempted sign-ins (last $LookbackDays days): $($appsWithAttempts.Count)" -ForegroundColor Magenta
 }
