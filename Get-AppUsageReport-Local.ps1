@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds a local-only, resumable app-usage and dependency report for Entra ID service principals.
+  Builds a local, resumable Entra service-principal usage report with dependency and provisioning recency signals.
 
 .DESCRIPTION
   Collects service principal activity and dependency signals, then outputs a
@@ -8,6 +8,12 @@
   Graph servicePrincipalSignInActivities and, when configured, Log Analytics
   sign-in tables (SigninLogs, AADServicePrincipalSignInLogs,
   AADManagedIdentitySignInLogs).
+
+  The latest dependency model includes synchronization job recency. A
+  provisioning dependency signal is raised only when exactly one provisioning
+  job exists and its latest observed run is within 90 days. In that case,
+  RiskLevel is forced to Active and ProvisioningLastRunUtc is included in
+  output.
 
   Designed for local execution. The script supports resumable processing by
   writing a run-state checkpoint file and reusing it on the next run when the
@@ -28,8 +34,8 @@
   AADServicePrincipalSignInLogs, and AADManagedIdentitySignInLogs
   (isfuzzy=true, missing tables skipped). Omit for Graph-only operation.
   In this sanitized shared script, the in-code workspace value is intentionally
-  reset unless you customize that section locally, so passing -WorkspaceId
-  alone is not sufficient in the shared copy.
+  hardcoded later in the file. That assignment overrides -WorkspaceId, so edit
+  the hardcoded value (set your real workspace ID or blank it for Graph-only).
 
 .PARAMETER LookbackDays
   How far back to query Log Analytics. Should not exceed your workspace
@@ -79,15 +85,16 @@
 
 .EXAMPLE
   # Graph only — uses dated default CSV name in current directory
+  # (Ensure the hardcoded $WorkspaceId section remains blank for Graph-only mode.)
   .\Get-AppUsageReport-Local.ps1
 
 .EXAMPLE
-  # Graph + Log Analytics (after local private configuration / script customization)
-  .\Get-AppUsageReport-Local.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -OutCsv .\report.csv
+  # Graph + Log Analytics (after replacing the hardcoded $WorkspaceId in the script)
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv
 
 .EXAMPLE
-  # Custom thresholds, include never-used apps (after local private configuration / script customization)
-  .\Get-AppUsageReport-Local.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
+  # Custom thresholds, include never-used apps
+  .\Get-AppUsageReport-Local.ps1 -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
 
 .EXAMPLE
   # Filter by specific SP IDs from input CSV
@@ -108,6 +115,10 @@
 .EXAMPLE
   # Non-interactive same-day handling
   .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv -SameDayRunStateAction Reuse
+
+.EXAMPLE
+  # Review output with provisioning recency column in console + CSV
+  .\Get-AppUsageReport-Local.ps1 -OutCsv .\report.csv
 #>
 param(
   [int]$UnusedDays    = 180,
@@ -139,7 +150,7 @@ if ($KeepRunState) {
 }
 
 # Hardcoded Log Analytics workspace
-$WorkspaceId = ""
+$WorkspaceId = ""   # <-- REPLACE WITH YOUR WORKSPACE ID FOR LOG ANALYTICS QUERYING, OR LEAVE BLANK FOR GRAPH-ONLY MODE
 
 # ------------------------------------------------------------
 # Load input CSV filter (if provided)
@@ -411,6 +422,93 @@ function Get-OAuthGrantsResource {
   return @($resp.value).Count
 }
 
+function Get-LatestProvisioningRunUtc {
+  param(
+    [array]$Jobs,
+    [string]$SpId
+  )
+
+  $candidates = [System.Collections.Generic.List[datetime]]::new()
+
+  function Add-DateCandidate {
+    param([object]$Value)
+    if (-not $Value) { return }
+    try {
+      $null = $candidates.Add([datetime]$Value)
+    }
+    catch {
+    }
+  }
+
+  foreach ($job in @($Jobs)) {
+    foreach ($path in @(
+        'status.lastExecution.endDateTime',
+        'status.lastExecution.startDateTime',
+        'status.lastExecution.timeEnded',
+        'status.lastExecution.timeStarted',
+        'status.lastExecution.timeBegan',
+        'status.lastExecution.endTime',
+        'status.lastExecution.startTime',
+        'status.lastSuccessfulExecution.endDateTime',
+        'status.lastSuccessfulExecution.startDateTime',
+        'status.lastSuccessfulExecution.timeEnded',
+        'status.lastSuccessfulExecution.timeStarted',
+        'status.lastSuccessfulExecution.timeBegan',
+        'status.lastRunDateTime',
+        'status.lastExecutionDateTime',
+        'schedule.lastExecution',
+        'schedule.lastExecutionDateTime'
+      )) {
+      Add-DateCandidate -Value (Get-ValueByPath $job $path)
+    }
+  }
+
+  if ($candidates.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($SpId)) {
+    foreach ($job in @($Jobs)) {
+      $jobId = Get-Prop $job 'id'
+      if ([string]::IsNullOrWhiteSpace($jobId)) { continue }
+
+      foreach ($uri in @(
+          "https://graph.microsoft.com/v1.0/servicePrincipals/$SpId/synchronization/jobs/$jobId",
+          "https://graph.microsoft.com/beta/servicePrincipals/$SpId/synchronization/jobs/$jobId"
+        )) {
+        try {
+          $detail = Invoke-MgGraphRequest -Uri $uri -Method GET
+          foreach ($path in @(
+              'status.lastExecution.endDateTime',
+              'status.lastExecution.startDateTime',
+              'status.lastExecution.timeEnded',
+              'status.lastExecution.timeStarted',
+              'status.lastExecution.timeBegan',
+              'status.lastExecution.endTime',
+              'status.lastExecution.startTime',
+              'status.lastSuccessfulExecution.endDateTime',
+              'status.lastSuccessfulExecution.startDateTime',
+              'status.lastSuccessfulExecution.timeEnded',
+              'status.lastSuccessfulExecution.timeStarted',
+              'status.lastSuccessfulExecution.timeBegan',
+              'status.lastRunDateTime',
+              'status.lastExecutionDateTime',
+              'schedule.lastExecution',
+              'schedule.lastExecutionDateTime'
+            )) {
+            Add-DateCandidate -Value (Get-ValueByPath $detail $path)
+          }
+
+          if ($candidates.Count -gt 0) {
+            break
+          }
+        }
+        catch {
+        }
+      }
+    }
+  }
+
+  if ($candidates.Count -eq 0) { return $null }
+  return (($candidates | Sort-Object -Descending | Select-Object -First 1).ToString('o'))
+}
+
 function Get-SynchronizationJobInfo {
   param($spId)
 
@@ -428,6 +526,7 @@ function Get-SynchronizationJobInfo {
     return [pscustomobject]@{
       JobCount    = $jobs.Count
       ActiveCount = $activeCount
+      LastRunUtc  = Get-LatestProvisioningRunUtc -Jobs $jobs -SpId $spId
       CheckStatus = 'Ok'
     }
   }
@@ -435,6 +534,7 @@ function Get-SynchronizationJobInfo {
     return [pscustomobject]@{
       JobCount    = $null
       ActiveCount = $null
+      LastRunUtc  = $null
       CheckStatus = 'Unavailable'
     }
   }
@@ -588,10 +688,12 @@ function Get-ServicePrincipalDependencyInfo {
         $activeCount++
       }
     }
+    $syncLastRunUtc = Get-LatestProvisioningRunUtc -Jobs $jobs -SpId $SpId
 
     $syncInfo = [pscustomobject]@{
       JobCount    = $jobs.Count
       ActiveCount = $activeCount
+      LastRunUtc  = $syncLastRunUtc
       CheckStatus = 'Ok'
     }
   }
@@ -1158,6 +1260,26 @@ foreach ($sp in $servicePrincipals) {
   $syncInfo        = $dependencyInfo.SyncInfo
   $fedCredInfo     = $dependencyInfo.FedCredInfo
 
+  # Provisioning dependency/risk signal is based on a recent completed cycle.
+  # Rules requested:
+  # - JobCount = 1 and LastRunUtc blank    => NOT a dependency signal
+  # - JobCount = 1 and LastRunUtc > 90 days => NOT a dependency signal
+  # - JobCount = 1 and LastRunUtc <= 90 days => dependency signal and force RiskLevel=Active
+  $provisioningLastRun = $null
+  $provisioningDaysSinceLastRun = $null
+  if ($syncInfo -and $syncInfo.LastRunUtc) {
+    try {
+      $provisioningLastRun = [datetime]$syncInfo.LastRunUtc
+      $provisioningDaysSinceLastRun = [int]($nowUtc - $provisioningLastRun.ToUniversalTime()).TotalDays
+    }
+    catch {
+      $provisioningLastRun = $null
+      $provisioningDaysSinceLastRun = $null
+    }
+  }
+
+  $hasRecentProvisioningDependency = ($syncInfo.JobCount -eq 1) -and ($null -ne $provisioningDaysSinceLastRun) -and ($provisioningDaysSinceLastRun -le 90)
+
   # --- Risk level (activity + credential liveness) ---
   $tooNew = $null -ne $createdDaysAgo -and $createdDaysAgo -lt 30
   $isActiveByUsage = $null -ne $daysSince -and $daysSince -lt $UnusedDays
@@ -1181,6 +1303,10 @@ foreach ($sp in $servicePrincipals) {
     "Medium"
   }
 
+  if ($hasRecentProvisioningDependency) {
+    $riskLevel = "Active"
+  }
+
   # --- Dependency signals (independent of risk level) ---
   $depReasons = @()
   if ($times.DelegatedResourceUtc) { $depReasons += "UsedAsAPI" }
@@ -1188,7 +1314,7 @@ foreach ($sp in $servicePrincipals) {
   if ($roleAssignments -gt 0)      { $depReasons += "AppRoleAssignments" }
   if ($oauthClient -gt 0)          { $depReasons += "OAuthClientGrants" }
   if ($oauthResource -gt 0)        { $depReasons += "OAuthResourceGrants" }
-  if ($syncInfo.JobCount -gt 0)    { $depReasons += "ProvisioningJobs" }
+  if ($hasRecentProvisioningDependency) { $depReasons += "ProvisioningJobs" }
   if ($syncInfo.CheckStatus -eq 'Unavailable') { $depReasons += "ProvisioningCheckUnavailable" }
   if ($fedCredInfo.Count -gt 0)    { $depReasons += "FederatedCredentials" }
   if ($lastFederatedCredentialUse) { $depReasons += "FederatedCredentialUsedInSignInLogs" }
@@ -1287,7 +1413,7 @@ foreach ($sp in $servicePrincipals) {
     OAuthClientGrants        = $oauthClient
     OAuthResourceGrants      = $oauthResource
     ProvisioningJobCount     = $syncInfo.JobCount
-    ActiveProvisioningJobs   = $syncInfo.ActiveCount
+    ProvisioningLastRunUtc   = $syncInfo.LastRunUtc
     ProvisioningCheckStatus  = $syncInfo.CheckStatus
 
     HasSecrets               = $hasSecrets
@@ -1355,7 +1481,7 @@ $report | Group-Object RiskLevel | Sort-Object Name | ForEach-Object {
 }
 
 Write-Host ""
-  $report | Format-Table DisplayName, OwnershipClass, TrueLastActivity, DaysSinceActivity, RiskLevel, CandidateForDisableReview, DependencySignals -AutoSize
+  $report | Format-Table DisplayName, OwnershipClass, TrueLastActivity, DaysSinceActivity, ProvisioningLastRunUtc, RiskLevel, CandidateForDisableReview, DependencySignals -AutoSize
 
 if ($OutCsv) {
   $report | Export-Csv $OutCsv -NoTypeInformation

@@ -56,7 +56,7 @@ Parameters:
 | Parameter | Default | Notes |
 |---|---|---|
 | `-UnusedDays` | `180` | Inactivity threshold |
-| `-WorkspaceId` | empty | Present in the script signature, but the sanitized shared script resets it in-code; populate/customize that section in your private copy before LA queries will run |
+| `-WorkspaceId` | empty | Present in the script signature, but the sanitized shared script overrides it later with a hardcoded placeholder value; update that in-code value in your private copy before LA queries will run |
 | `-LookbackDays` | `90` | Log Analytics lookback window |
 | `-Top` | `0` | Limit after filtering |
 | `-IncludeNeverUsed` | `true` | Use `:$false` to exclude apps with no activity |
@@ -81,6 +81,8 @@ Extra behavior compared with `Get-AppUsageReport-AzurePlaceholder.ps1`:
 - supports explicit checkpoint path control
 - supports non-interactive same-day action selection (`Prompt`, `Reuse`, `Delete`)
 - reduces local run overhead by throttling progress updates and avoiding repeated array-copy growth during report construction
+- derives `ProvisioningLastRunUtc` from synchronization jobs and only treats provisioning as a dependency signal when exactly one job exists and the latest run is within 90 days
+- forces `RiskLevel=Active` when that recent provisioning dependency rule is met
 
 Typical usage:
 
@@ -208,6 +210,7 @@ The report scripts emit objects with fields including:
 - `OAuthClientGrants`
 - `OAuthResourceGrants`
 - `ProvisioningJobCount`
+- `ProvisioningLastRunUtc`
 - `HasLiveCredentials`
 - `FederatedCredentialCount`
 - `RiskLevel`
@@ -227,6 +230,12 @@ Important classification behavior:
 `RecommendedActionReason` is a short human-readable explanation of why that action was chosen for the row.
 
 Both reporting scripts now try to batch dependency checks per service principal through Microsoft Graph for better large-tenant performance. If a batch request fails, they fall back to the older individual-request path for the rest of the run.
+
+For `Get-AppUsageReport-Local.ps1`, provisioning dependency now uses a recency rule:
+
+- if exactly one provisioning job exists and its latest run is within 90 days, `DependencySignals` includes `ProvisioningJobs`
+- in that same case, `RiskLevel` is forced to `Active`
+- otherwise, provisioning does not count as an active dependency signal (unless the provisioning check itself is unavailable)
 
 | `RecommendedAction` | Meaning in practice |
 |---|---|
@@ -271,7 +280,7 @@ This is the detection time recorded by the archive process, not an authoritative
 
 ## Authentication Notes
 
-This repository is sanitized. Values such as tenant ID, client ID, certificate thumbprint, and workspace ID are intentionally blank in source.
+This repository is sanitized. Values such as tenant ID, client ID, certificate thumbprint, and workspace ID placeholders are intentionally non-production in source.
 
 Current behavior:
 
@@ -284,10 +293,10 @@ There is also an important current quirk in both reporting scripts:
 
 ```powershell
 # Hardcoded Log Analytics workspace
-$WorkspaceId = ""
+$WorkspaceId = "00000000-0000-0000-0000-000000000000"
 ```
 
-That line overwrites any `-WorkspaceId` value passed on the command line unless you remove or change it in your private copy.
+That line overwrites any `-WorkspaceId` value passed on the command line unless you remove or change it in your private copy. Set it to your real workspace ID for Log Analytics mode, or blank it for Graph-only mode.
 
 `Report-DisabledAppReg.ps1` behaves similarly for Log Analytics: its shared copy intentionally sets the hardcoded `WorkspaceId` to an empty redacted value, so `-UseLA` requires you to populate that privately first.
 
