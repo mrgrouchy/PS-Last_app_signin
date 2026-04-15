@@ -2,7 +2,6 @@
 
 PowerShell scripts for reviewing Entra ID applications and service principals during cleanup work. The repo currently contains:
 
-- `Get-AppUsageReport-AzurePlaceholder.ps1`: tenant-wide or targeted usage/dependency report placeholder for Azure-hosted automation
 - `Get-AppUsageReport-Local.ps1`: the same report with resumable local checkpointing
 - `Report-DisabledAppReg.ps1`: disabled app-registration tracker with optional Log Analytics enrichment and HTML reporting
 - `Export-DisabledEntraApplicationsArchive.ps1`: JSON-first archive of disabled applications for later reference or partial recreation
@@ -36,40 +35,11 @@ They do not disable, delete, revoke, or modify tenant objects.
 
 ## Scripts
 
-### `Get-AppUsageReport-AzurePlaceholder.ps1`
-
-This file is a placeholder for the Azure-hosted / automation-oriented variant of the usage report. It remains in the repo as a reference shape for that path, but it is not the intended manual/operator entry point.
-
-Key behavior:
-
-- loads service principals and app registrations in bulk
-- batches per-service-principal dependency lookups through Microsoft Graph where possible, with fallback to individual calls if batching fails
-- classifies apps as `TenantOwned`, `MicrosoftFirstParty`, or `ConsentedExternalApp`
-- calculates `TrueLastActivity` from all available activity sources
-- inspects credential expiry and dependency signals
-- assigns `RiskLevel`, `CandidateForDisableReview`, `RecommendedAction`, and `RecommendedActionReason`
-- can scope processing with an input CSV
-- can export the final report to CSV
-
-Parameters:
-
-| Parameter | Default | Notes |
-|---|---|---|
-| `-UnusedDays` | `180` | Inactivity threshold |
-| `-WorkspaceId` | empty | Present in the script signature, but the sanitized shared script overrides it later with a hardcoded placeholder value; update that in-code value in your private copy before LA queries will run |
-| `-LookbackDays` | `90` | Log Analytics lookback window |
-| `-Top` | `0` | Limit after filtering |
-| `-IncludeNeverUsed` | `true` | Use `:$false` to exclude apps with no activity |
-| `-OutCsv` | empty | CSV export path |
-| `-InputCsv` | empty | Optional target list |
-
-For manual runs, use `Get-AppUsageReport-Local.ps1`.
-
 ### `Get-AppUsageReport-Local.ps1`
 
-This is the local/resumable variant of the same report. It is intended for operator-driven local execution and adds checkpoint-based resume support for long runs or interrupted sessions.
+This is the local/resumable variant of the same report. It is intended for operator-driven local execution.
 
-Extra behavior compared with `Get-AppUsageReport-AzurePlaceholder.ps1`:
+Local-only behavior:
 
 - writes a run-state JSON file while processing
 - lets you control how often the checkpoint file is updated with `-CheckpointInterval`
@@ -284,7 +254,6 @@ This repository is sanitized. Values such as tenant ID, client ID, certificate t
 
 Current behavior:
 
-- `Get-AppUsageReport-AzurePlaceholder.ps1` is the placeholder for the older Azure-hosted / automation runner approach; the actual ALM automation runbook lives at `ALM/ALM-AppUsageReport.ps1`
 - `Get-AppUsageReport-Local.ps1` first checks for a working existing Graph session, then tries app-certificate auth when configured, and otherwise falls back to interactive sign-in for testing
 - `Report-DisabledAppReg.ps1` currently uses interactive `Connect-MgGraph -Scopes "Application.Read.All"` and its hardcoded `WorkspaceId` is intentionally redacted in the shared repo
 - `Export-DisabledEntraApplicationsArchive.ps1` first checks `Get-MgContext`; if Graph is already connected it reuses that session, otherwise it falls back to interactive sign-in when no app certificate values are set
@@ -293,7 +262,7 @@ There is also an important current quirk in both reporting scripts:
 
 ```powershell
 # Hardcoded Log Analytics workspace
-$WorkspaceId = "00000000-0000-0000-0000-000000000000"
+$WorkspaceId = ""
 ```
 
 That line overwrites any `-WorkspaceId` value passed on the command line unless you remove or change it in your private copy. Set it to your real workspace ID for Log Analytics mode, or blank it for Graph-only mode.
