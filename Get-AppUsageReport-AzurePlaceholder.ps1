@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Builds an app-usage and dependency report for Entra ID service principals.
+  Builds an Azure-placeholder, resumable Entra service-principal usage report with dependency and provisioning recency signals.
 
 .DESCRIPTION
   Collects service principal activity and dependency signals, then outputs a
@@ -9,10 +9,18 @@
   sign-in tables (SigninLogs, AADServicePrincipalSignInLogs,
   AADManagedIdentitySignInLogs).
 
-  This script is a placeholder for the Azure-hosted / automation-oriented
-  variant of the report. The local/resumable operator workflow lives in
-  Get-AppUsageReport-Local.ps1, and the ALM automation runbook lives in
-  ALM/ALM-AppUsageReport.ps1.
+  The latest dependency model includes synchronization job recency. A
+  provisioning dependency signal is raised only when exactly one provisioning
+  job exists and its latest observed run is within 90 days. In that case,
+  RiskLevel is forced to Active and ProvisioningLastRunUtc is included in
+  output.
+
+  Designed for Azure-hosted adaptation with local parity. The script supports resumable processing by
+  writing a run-state checkpoint file and reusing it on the next run when the
+  processing scope and key parameters match. For authentication, the script
+  first reuses an existing working Microsoft Graph session when present, then
+  tries app-certificate auth when configured, and otherwise falls back to
+  interactive Graph sign-in for testing.
 
   Note: this repository is sanitized for sharing. Authentication and workspace
   values are redacted and should be supplied in your private environment.
@@ -25,9 +33,9 @@
   When enabled in your local/private copy, queries SigninLogs,
   AADServicePrincipalSignInLogs, and AADManagedIdentitySignInLogs
   (isfuzzy=true, missing tables skipped). Omit for Graph-only operation.
-  In this sanitized shared script, the parameter value is reset in-code unless
-  you customize that section locally, so passing -WorkspaceId alone is not
-  sufficient in the shared copy.
+  In this sanitized shared script, the in-code workspace value is intentionally
+  hardcoded later in the file. That assignment overrides -WorkspaceId, so edit
+  the hardcoded value (set your real workspace ID or blank it for Graph-only).
 
 .PARAMETER LookbackDays
   How far back to query Log Analytics. Should not exceed your workspace
@@ -42,8 +50,8 @@
   Default: enabled. Use -IncludeNeverUsed:$false to exclude never-used apps.
 
 .PARAMETER OutCsv
-  Optional path for exporting the final app-usage report to CSV.
-  If omitted, the report is only shown in the console and no CSV file is written.
+  Path to export a CSV report.
+  If omitted, defaults to ".\Get-AppUsageReport-<yyyy-MM-dd>.csv".
 
 .PARAMETER InputCsv
   Optional path to an input CSV used to scope processing.
@@ -54,17 +62,39 @@
   If direct SP matching returns no results, the script also attempts fallback
   resolution from app registration object IDs to AppId.
 
+.PARAMETER RunStatePath
+  Optional path to a checkpoint JSON file used for resume-on-failure behavior.
+  If omitted, defaults to:
+  - "<OutCsvDirectory>\<OutCsvBaseName>.runstate.json" when OutCsv is set
+  - "Get-AppUsageReport-AzurePlaceholder.runstate.json" in the current directory otherwise
+
+.PARAMETER NoResume
+  Disables loading an existing run-state file. Processing starts fresh, but the
+  script still writes a new run-state checkpoint during the current run.
+
+.PARAMETER KeepRunState
+  Deprecated compatibility switch. Run-state is retained for same-day reruns
+  and rotated automatically when a new local day starts.
+
+.PARAMETER SameDayRunStateAction
+  Behavior when a run-state file from the same local day is found:
+  - Prompt (default): ask whether to reuse or delete it
+  - Reuse: automatically reuse it when fingerprint matches
+  - Delete: automatically remove it and start fresh
+  Run-state files from previous days are automatically removed.
+
 .EXAMPLE
-  # Graph only — 180d SP activity, no LA required
+  # Graph only — uses dated default CSV name in current directory
+  # (Ensure the hardcoded $WorkspaceId section remains blank for Graph-only mode.)
+  .\Get-AppUsageReport-AzurePlaceholder.ps1
+
+.EXAMPLE
+  # Graph + Log Analytics (after replacing the hardcoded $WorkspaceId in the script)
   .\Get-AppUsageReport-AzurePlaceholder.ps1 -OutCsv .\report.csv
 
 .EXAMPLE
-  # Graph + Log Analytics (after local private configuration / script customization)
-  .\Get-AppUsageReport-AzurePlaceholder.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -OutCsv .\report.csv
-
-.EXAMPLE
-  # Custom thresholds, include never-used apps (after local private configuration / script customization)
-  .\Get-AppUsageReport-AzurePlaceholder.ps1 -WorkspaceId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
+  # Custom thresholds, include never-used apps
+  .\Get-AppUsageReport-AzurePlaceholder.ps1 -UnusedDays 90 -LookbackDays 90 -IncludeNeverUsed -OutCsv .\report.csv
 
 .EXAMPLE
   # Filter by specific SP IDs from input CSV
@@ -73,6 +103,22 @@
 .EXAMPLE
   # Process only the first 200 filtered service principals
   .\Get-AppUsageReport-AzurePlaceholder.ps1 -Top 200 -OutCsv .\report.csv
+
+.EXAMPLE
+  # Resume-capable run using explicit checkpoint file
+  .\Get-AppUsageReport-AzurePlaceholder.ps1 -OutCsv .\report.csv -RunStatePath .\report.runstate.json
+
+.EXAMPLE
+  # Force fresh run and ignore any previous checkpoint
+  .\Get-AppUsageReport-AzurePlaceholder.ps1 -OutCsv .\report.csv -NoResume
+
+.EXAMPLE
+  # Non-interactive same-day handling
+  .\Get-AppUsageReport-AzurePlaceholder.ps1 -OutCsv .\report.csv -SameDayRunStateAction Reuse
+
+.EXAMPLE
+  # Review output with provisioning recency column in console + CSV
+  .\Get-AppUsageReport-AzurePlaceholder.ps1 -OutCsv .\report.csv
 #>
 param(
   [int]$UnusedDays    = 180,
@@ -81,7 +127,14 @@ param(
   [int]$Top           = 0,
   [switch]$IncludeNeverUsed,
   [string]$OutCsv     = "",
-  [string]$InputCsv   = ""
+  [string]$InputCsv   = "",
+  [string]$RunStatePath = "",
+  [switch]$NoResume,
+  [switch]$KeepRunState,
+  [ValidateRange(1, 500)]
+  [int]$CheckpointInterval = 25,
+  [ValidateSet('Prompt','Reuse','Delete')]
+  [string]$SameDayRunStateAction = 'Prompt'
 )
 
 Set-StrictMode -Version Latest
@@ -92,28 +145,12 @@ if (-not $PSBoundParameters.ContainsKey('IncludeNeverUsed')) {
   $IncludeNeverUsed = $true
 }
 
-# TODO(AzureAutomation):
-# - Replace certificate-thumbprint auth with a non-interactive Azure Automation approach.
-# - Preferred options:
-#   1. System-assigned or user-assigned managed identity for Graph and Log Analytics
-#   2. Automation account Run As / app registration only if MI is not viable
-# - Keep this script aligned to unattended Azure execution semantics; local/operator convenience features belong in Get-AppUsageReport-Local.ps1.
-# - Add an auth helper that detects local execution vs Azure Automation and chooses the correct connection flow.
-# - Move tenant/app/workspace settings to Automation variables, managed identity context, or environment variables.
-# - Remove the hardcoded/sanitized auth placeholders once the production auth path is implemented.
-#
-# TODO(SQLStorage):
-# - Add a SQL output mode so report rows are persisted to a database instead of or alongside CSV.
-# - Decide whether to:
-#   1. truncate and reload a reporting table per run, or
-#   2. append snapshots with a RunId/RunTimestamp for historical trending.
-# - Add parameters for SQL server/database/table/auth mode.
-# - Normalize report schema and data types before insert.
-# - Implement batched writes and upsert strategy.
-# - Capture run metadata separately (RunId, executed at, thresholds, LA enabled, row count, source script).
+if ($KeepRunState) {
+  Write-Warning "-KeepRunState is deprecated and no longer required; run-state is retained for same-day reruns automatically."
+}
 
 # Hardcoded Log Analytics workspace
-$WorkspaceId = ""
+$WorkspaceId = ""   # <-- REPLACE WITH YOUR WORKSPACE ID FOR LOG ANALYTICS QUERYING, OR LEAVE BLANK FOR GRAPH-ONLY MODE
 
 # ------------------------------------------------------------
 # Load input CSV filter (if provided)
@@ -195,16 +232,46 @@ else {
 # Graph connection
 # ------------------------------------------------------------
 
-# TODO(AzureAutomation): replace this local certificate-based Graph auth block with a shared auth helper.
-# For Azure Automation, prefer Connect-MgGraph via managed identity if the required Graph app roles are assigned.
-# Example future shape:
-# - local/dev: existing cert or interactive login
-# - automation: Connect-MgGraph -Identity
 $TenantId  = ""
 $ClientId  = ""
 $Thumbprint = ""   # cert must exist in CurrentUser\My or LocalMachine\My
 
-Connect-MgGraph -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $Thumbprint -NoWelcome
+function Test-GraphConnectivity {
+  try {
+    Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$top=1&`$select=id" -Method GET -ErrorAction Stop | Out-Null
+    return $true
+  }
+  catch {
+    return $false
+  }
+}
+
+$usingExistingGraph = $false
+try {
+  $ctx = Get-MgContext -ErrorAction Stop
+  if ($ctx -and $ctx.Account -and (Test-GraphConnectivity)) {
+    $usingExistingGraph = $true
+    Write-Host "Using existing Microsoft Graph session: $($ctx.Account) ($($ctx.TenantId))" -ForegroundColor DarkGray
+  }
+}
+catch {
+  $usingExistingGraph = $false
+}
+
+if (-not $usingExistingGraph) {
+  $hasAppAuthConfig = (-not [string]::IsNullOrWhiteSpace($TenantId)) -and
+                      (-not [string]::IsNullOrWhiteSpace($ClientId)) -and
+                      (-not [string]::IsNullOrWhiteSpace($Thumbprint))
+
+  if ($hasAppAuthConfig) {
+    Write-Host "No active Graph session found. Connecting with app certificate auth..." -ForegroundColor Cyan
+    Connect-MgGraph -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $Thumbprint -NoWelcome
+  }
+  else {
+    Write-Host "No active Graph session found and app auth values are empty. Using interactive Graph sign-in fallback..." -ForegroundColor Cyan
+    Connect-MgGraph -Scopes "Application.Read.All","Directory.Read.All","AuditLog.Read.All" -NoWelcome
+  }
+}
 
 
 
@@ -212,9 +279,6 @@ Connect-MgGraph -TenantId $TenantId -ClientId $ClientId -CertificateThumbprint $
 # Az connection (only when WorkspaceId supplied)
 # ------------------------------------------------------------
 
-# TODO(AzureAutomation): align Az auth with the Graph auth strategy.
-# If WorkspaceId / Log Analytics is kept for scheduled runs, prefer Connect-AzAccount -Identity in Azure Automation.
-# Also remove the current WorkspaceId overwrite pattern so runtime configuration can be supplied externally.
 $useLA = ($WorkspaceId -ne "")
 
 if ($useLA) {
@@ -358,6 +422,93 @@ function Get-OAuthGrantsResource {
   return @($resp.value).Count
 }
 
+function Get-LatestProvisioningRunUtc {
+  param(
+    [array]$Jobs,
+    [string]$SpId
+  )
+
+  $candidates = [System.Collections.Generic.List[datetime]]::new()
+
+  function Add-DateCandidate {
+    param([object]$Value)
+    if (-not $Value) { return }
+    try {
+      $null = $candidates.Add([datetime]$Value)
+    }
+    catch {
+    }
+  }
+
+  foreach ($job in @($Jobs)) {
+    foreach ($path in @(
+        'status.lastExecution.endDateTime',
+        'status.lastExecution.startDateTime',
+        'status.lastExecution.timeEnded',
+        'status.lastExecution.timeStarted',
+        'status.lastExecution.timeBegan',
+        'status.lastExecution.endTime',
+        'status.lastExecution.startTime',
+        'status.lastSuccessfulExecution.endDateTime',
+        'status.lastSuccessfulExecution.startDateTime',
+        'status.lastSuccessfulExecution.timeEnded',
+        'status.lastSuccessfulExecution.timeStarted',
+        'status.lastSuccessfulExecution.timeBegan',
+        'status.lastRunDateTime',
+        'status.lastExecutionDateTime',
+        'schedule.lastExecution',
+        'schedule.lastExecutionDateTime'
+      )) {
+      Add-DateCandidate -Value (Get-ValueByPath $job $path)
+    }
+  }
+
+  if ($candidates.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($SpId)) {
+    foreach ($job in @($Jobs)) {
+      $jobId = Get-Prop $job 'id'
+      if ([string]::IsNullOrWhiteSpace($jobId)) { continue }
+
+      foreach ($uri in @(
+          "https://graph.microsoft.com/v1.0/servicePrincipals/$SpId/synchronization/jobs/$jobId",
+          "https://graph.microsoft.com/beta/servicePrincipals/$SpId/synchronization/jobs/$jobId"
+        )) {
+        try {
+          $detail = Invoke-MgGraphRequest -Uri $uri -Method GET
+          foreach ($path in @(
+              'status.lastExecution.endDateTime',
+              'status.lastExecution.startDateTime',
+              'status.lastExecution.timeEnded',
+              'status.lastExecution.timeStarted',
+              'status.lastExecution.timeBegan',
+              'status.lastExecution.endTime',
+              'status.lastExecution.startTime',
+              'status.lastSuccessfulExecution.endDateTime',
+              'status.lastSuccessfulExecution.startDateTime',
+              'status.lastSuccessfulExecution.timeEnded',
+              'status.lastSuccessfulExecution.timeStarted',
+              'status.lastSuccessfulExecution.timeBegan',
+              'status.lastRunDateTime',
+              'status.lastExecutionDateTime',
+              'schedule.lastExecution',
+              'schedule.lastExecutionDateTime'
+            )) {
+            Add-DateCandidate -Value (Get-ValueByPath $detail $path)
+          }
+
+          if ($candidates.Count -gt 0) {
+            break
+          }
+        }
+        catch {
+        }
+      }
+    }
+  }
+
+  if ($candidates.Count -eq 0) { return $null }
+  return (($candidates | Sort-Object -Descending | Select-Object -First 1).ToString('o'))
+}
+
 function Get-SynchronizationJobInfo {
   param($spId)
 
@@ -375,6 +526,7 @@ function Get-SynchronizationJobInfo {
     return [pscustomobject]@{
       JobCount    = $jobs.Count
       ActiveCount = $activeCount
+      LastRunUtc  = Get-LatestProvisioningRunUtc -Jobs $jobs -SpId $spId
       CheckStatus = 'Ok'
     }
   }
@@ -382,6 +534,7 @@ function Get-SynchronizationJobInfo {
     return [pscustomobject]@{
       JobCount    = $null
       ActiveCount = $null
+      LastRunUtc  = $null
       CheckStatus = 'Unavailable'
     }
   }
@@ -535,10 +688,12 @@ function Get-ServicePrincipalDependencyInfo {
         $activeCount++
       }
     }
+    $syncLastRunUtc = Get-LatestProvisioningRunUtc -Jobs $jobs -SpId $SpId
 
     $syncInfo = [pscustomobject]@{
       JobCount    = $jobs.Count
       ActiveCount = $activeCount
+      LastRunUtc  = $syncLastRunUtc
       CheckStatus = 'Ok'
     }
   }
@@ -574,6 +729,93 @@ function Get-ServicePrincipalDependencyInfo {
   }
 }
 
+# ------------------------------------------------------------
+# Resume helpers
+# ------------------------------------------------------------
+
+function Get-RunFingerprint {
+  param(
+    [array]$ServicePrincipals,
+    [int]$UnusedDays,
+    [int]$LookbackDays,
+    [int]$Top,
+    [bool]$IncludeNeverUsed,
+    [bool]$UseLA
+  )
+
+  $ids = @(
+    $ServicePrincipals |
+      ForEach-Object { Get-Prop $_ "id" } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Sort-Object
+  )
+
+  $signature = [pscustomobject]@{
+    ServicePrincipalIds = $ids
+    UnusedDays          = $UnusedDays
+    LookbackDays        = $LookbackDays
+    Top                 = $Top
+    IncludeNeverUsed    = $IncludeNeverUsed
+    UseLA               = $UseLA
+  } | ConvertTo-Json -Depth 6 -Compress
+
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($signature)
+    $hashBytes = $sha.ComputeHash($bytes)
+    return ([System.BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant()
+  }
+  finally {
+    $sha.Dispose()
+  }
+}
+
+function Save-RunCheckpoint {
+  param(
+    [string]$Path,
+    [string]$Fingerprint,
+    [int]$Total,
+    [hashtable]$ProcessedMap,
+    [System.Collections.IEnumerable]$Rows
+  )
+
+  $state = [pscustomobject]@{
+    Version                = 1
+    SavedAtUtc             = (Get-Date).ToUniversalTime().ToString("o")
+    SavedOnLocalDate       = (Get-Date).ToString("yyyy-MM-dd")
+    Fingerprint            = $Fingerprint
+    TotalServicePrincipals = $Total
+    ProcessedServicePrincipalIds = @($ProcessedMap.Keys | Sort-Object)
+    ReportRows             = @($Rows)
+  }
+
+  $json    = $state | ConvertTo-Json -Depth 12
+  $tmpPath = "$Path.tmp"
+
+  # Write to a temp file first so OneDrive never locks the live checkpoint during the write.
+  Set-Content -Path $tmpPath -Value $json -Encoding UTF8
+
+  # Rename over the real file with exponential-backoff retries (handles brief OneDrive sync locks).
+  $maxRetries = 6
+  $delayMs    = 500
+  for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+      Move-Item -LiteralPath $tmpPath -Destination $Path -Force -ErrorAction Stop
+      return
+    }
+    catch {
+      if ($attempt -lt $maxRetries) {
+        Write-Verbose "Checkpoint rename attempt $attempt failed – retrying in ${delayMs} ms..."
+        Start-Sleep -Milliseconds $delayMs
+        $delayMs *= 2
+      } else {
+        Write-Warning "Could not save checkpoint after $maxRetries attempts: $_"
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+}
+
 # ============================================================
 # DATA COLLECTION
 # ============================================================
@@ -603,13 +845,16 @@ if ($useLA) {
 
   $kql = @"
 union isfuzzy=true
-    (SigninLogs                      | where TimeGenerated > ago(${LookbackDays}d) | extend T = "i"),
-    (AADServicePrincipalSignInLogs   | where TimeGenerated > ago(${LookbackDays}d) | extend T = "sp"),
-    (AADManagedIdentitySignInLogs    | where TimeGenerated > ago(${LookbackDays}d) | extend T = "mi")
+    (SigninLogs                      | where TimeGenerated > ago(${LookbackDays}d) | extend T = "i",  FederatedCredentialId = tostring(column_ifexists("FederatedCredentialId", ""))),
+    (AADServicePrincipalSignInLogs   | where TimeGenerated > ago(${LookbackDays}d) | extend T = "sp", FederatedCredentialId = tostring(column_ifexists("FederatedCredentialId", ""))),
+    (AADManagedIdentitySignInLogs    | where TimeGenerated > ago(${LookbackDays}d) | extend T = "mi", FederatedCredentialId = tostring(column_ifexists("FederatedCredentialId", "")))
 | summarize
     LastInteractive    = maxif(TimeGenerated, T == "i"),
     LastServicePrincipal = maxif(TimeGenerated, T == "sp"),
-    LastManagedIdentity  = maxif(TimeGenerated, T == "mi")
+    LastManagedIdentity  = maxif(TimeGenerated, T == "mi"),
+    LastFederatedCredentialUse = maxif(TimeGenerated, isnotempty(FederatedCredentialId)),
+    FederatedCredentialUseCount = countif(isnotempty(FederatedCredentialId)),
+    RecentFederatedCredentialIds = make_set_if(FederatedCredentialId, isnotempty(FederatedCredentialId), 10)
   by AppId
 "@
 
@@ -725,9 +970,122 @@ if ($hasInputFilter -and $servicePrincipals.Count -eq 0 -and ($filterSpObjectIds
 $now    = Get-Date
 $nowUtc = $now.ToUniversalTime()
 
+if ([string]::IsNullOrWhiteSpace($OutCsv)) {
+  $defaultCsvName = "Get-AppUsageReport-{0}.csv" -f $now.ToString("yyyy-MM-dd")
+  $OutCsv = Join-Path -Path $PWD -ChildPath $defaultCsvName
+  Write-Host "No -OutCsv supplied. Using dated default output: $OutCsv" -ForegroundColor DarkGray
+}
+
+$defaultStateName = "Get-AppUsageReport-AzurePlaceholder.runstate.json"
+if ([string]::IsNullOrWhiteSpace($RunStatePath)) {
+  if ($OutCsv) {
+    $outCsvFullPath = [System.IO.Path]::GetFullPath($OutCsv)
+    $outCsvDir = [System.IO.Path]::GetDirectoryName($outCsvFullPath)
+    $outCsvBaseName = [System.IO.Path]::GetFileNameWithoutExtension($outCsvFullPath)
+    $RunStatePath = Join-Path -Path $outCsvDir -ChildPath ("{0}.runstate.json" -f $outCsvBaseName)
+  } else {
+    $RunStatePath = Join-Path -Path $PWD -ChildPath $defaultStateName
+  }
+}
+
+$runFingerprint = Get-RunFingerprint -ServicePrincipals @($servicePrincipals) -UnusedDays $UnusedDays -LookbackDays $LookbackDays -Top $Top -IncludeNeverUsed ([bool]$IncludeNeverUsed) -UseLA ([bool]$useLA)
+$processedIds = @{}
+$reportRows = [System.Collections.Generic.List[object]]::new()
+
+if (-not $NoResume -and (Test-Path -LiteralPath $RunStatePath)) {
+  try {
+    # Open with FileShare.ReadWrite so we can read even while OneDrive holds the file open.
+    $existingState = $null
+    $readRetries   = 4
+    $readDelayMs   = 750
+    for ($rAttempt = 1; $rAttempt -le $readRetries; $rAttempt++) {
+      try {
+        $fs     = [System.IO.File]::Open($RunStatePath,
+                      [System.IO.FileMode]::Open,
+                      [System.IO.FileAccess]::Read,
+                      [System.IO.FileShare]::ReadWrite)
+        $reader = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
+        $raw    = $reader.ReadToEnd()
+        $reader.Dispose(); $fs.Dispose()
+        $existingState = $raw | ConvertFrom-Json
+        break
+      }
+      catch {
+        if ($rAttempt -lt $readRetries) {
+          Write-Verbose "Checkpoint read attempt $rAttempt failed – retrying in ${readDelayMs} ms..."
+          Start-Sleep -Milliseconds $readDelayMs
+          $readDelayMs *= 2
+        } else {
+          throw
+        }
+      }
+    }
+    $todayLocal = (Get-Date).ToString("yyyy-MM-dd")
+    $stateLocalDate = $null
+
+    if ($existingState -and $existingState.SavedOnLocalDate) {
+      $stateLocalDate = [string]$existingState.SavedOnLocalDate
+    } elseif ($existingState -and $existingState.SavedAtUtc) {
+      try {
+        $stateLocalDate = ([datetime]$existingState.SavedAtUtc).ToLocalTime().ToString("yyyy-MM-dd")
+      }
+      catch {
+        $stateLocalDate = $null
+      }
+    }
+
+    if ($stateLocalDate -and $stateLocalDate -ne $todayLocal) {
+      Remove-Item -LiteralPath $RunStatePath -Force -ErrorAction SilentlyContinue
+      Write-Host "Run-state is from $stateLocalDate (today: $todayLocal). Removed old checkpoint and starting fresh." -ForegroundColor Yellow
+    }
+    else {
+      $reuseSameDay = $true
+      if ($SameDayRunStateAction -eq 'Delete') {
+        $reuseSameDay = $false
+      }
+      elseif ($SameDayRunStateAction -eq 'Prompt') {
+        $answer = Read-Host "Same-day run-state found at '$RunStatePath'. Reuse it? (R)euse/(D)elete [R]"
+        if ($answer -and $answer.Trim().ToUpperInvariant().StartsWith("D")) {
+          $reuseSameDay = $false
+        }
+      }
+
+      if ($reuseSameDay) {
+        if ($existingState -and $existingState.Fingerprint -eq $runFingerprint) {
+          foreach ($id in @($existingState.ProcessedServicePrincipalIds)) {
+            if ($id) { $processedIds[[string]$id] = $true }
+          }
+          $reportRows = [System.Collections.Generic.List[object]]::new()
+          foreach ($savedRow in @($existingState.ReportRows)) {
+            $null = $reportRows.Add($savedRow)
+          }
+          Write-Host "Resuming from run-state: $RunStatePath ($($processedIds.Count)/$($servicePrincipals.Count) already processed)" -ForegroundColor Yellow
+        }
+        else {
+          Write-Warning "Existing run-state file does not match current scope/parameters. Starting a fresh run."
+        }
+      }
+      else {
+        Remove-Item -LiteralPath $RunStatePath -Force -ErrorAction SilentlyContinue
+        Write-Host "Deleted same-day checkpoint. Starting a fresh run." -ForegroundColor Yellow
+      }
+    }
+  }
+  catch {
+    Write-Warning "Could not load run-state file '$RunStatePath': $_`nStarting a fresh run."
+  }
+}
+elseif (-not $NoResume) {
+  Write-Host "Run-state enabled: $RunStatePath" -ForegroundColor DarkGray
+}
+
 $i = 0
+$saveEvery = [Math]::Max(1, [Math]::Min($CheckpointInterval, $servicePrincipals.Count))
+if ($servicePrincipals.Count -gt 0) {
+  Write-Host "Checkpoint interval        : every $saveEvery processed service principal(s)" -ForegroundColor DarkGray
+}
 $progressEvery = if ($servicePrincipals.Count -ge 200) { 10 } elseif ($servicePrincipals.Count -ge 50) { 5 } else { 1 }
-$report = foreach ($sp in $servicePrincipals) {
+foreach ($sp in $servicePrincipals) {
 
   $i++
   $spName = Get-Prop $sp "displayName"
@@ -737,6 +1095,9 @@ $report = foreach ($sp in $servicePrincipals) {
 
   $spAppId        = Get-Prop $sp "appId"
   $spId           = Get-Prop $sp "id"
+  if ($spId -and $processedIds.ContainsKey($spId)) {
+    continue
+  }
   $spType         = Get-Prop $sp "servicePrincipalType"
   $spIsDisabledRaw = Get-Prop $sp "isDisabled"
   $spIsDisabled    = $null
@@ -769,15 +1130,33 @@ $report = foreach ($sp in $servicePrincipals) {
   $lastInteractive    = $null
   $lastServicePrincipal = $null
   $lastManagedIdentity  = $null
+  $lastFederatedCredentialUse = $null
+  $federatedCredentialUseCount = 0
+  $recentFederatedCredentialIds = ""
   $la = $laByAppId[$spAppId]
   if ($la) {
     $li = Get-Prop $la "LastInteractive"
     $lsp = Get-Prop $la "LastServicePrincipal"
     $lmi = Get-Prop $la "LastManagedIdentity"
+    $lfcu = Get-Prop $la "LastFederatedCredentialUse"
+    $fcuc = Get-Prop $la "FederatedCredentialUseCount"
+    $fcids = Get-Prop $la "RecentFederatedCredentialIds"
     $epoch = "0001-01-01"
     if ($li -and -not $li.StartsWith($epoch)) { $lastInteractive    = [datetime]$li }
     if ($lsp -and -not $lsp.StartsWith($epoch)) { $lastServicePrincipal = [datetime]$lsp }
     if ($lmi -and -not $lmi.StartsWith($epoch)) { $lastManagedIdentity = [datetime]$lmi }
+    if ($lfcu -and -not $lfcu.StartsWith($epoch)) { $lastFederatedCredentialUse = [datetime]$lfcu }
+    if ($null -ne $fcuc) {
+      try {
+        $federatedCredentialUseCount = [int]$fcuc
+      }
+      catch {
+        $federatedCredentialUseCount = 0
+      }
+    }
+    if ($fcids) {
+      $recentFederatedCredentialIds = (@($fcids) | Where-Object { $_ }) -join ";"
+    }
   }
 
   # --- True last activity: max across ALL vectors ---
@@ -881,6 +1260,26 @@ $report = foreach ($sp in $servicePrincipals) {
   $syncInfo        = $dependencyInfo.SyncInfo
   $fedCredInfo     = $dependencyInfo.FedCredInfo
 
+  # Provisioning dependency/risk signal is based on a recent completed cycle.
+  # Rules requested:
+  # - JobCount = 1 and LastRunUtc blank    => NOT a dependency signal
+  # - JobCount = 1 and LastRunUtc > 90 days => NOT a dependency signal
+  # - JobCount = 1 and LastRunUtc <= 90 days => dependency signal and force RiskLevel=Active
+  $provisioningLastRun = $null
+  $provisioningDaysSinceLastRun = $null
+  if ($syncInfo -and $syncInfo.LastRunUtc) {
+    try {
+      $provisioningLastRun = [datetime]$syncInfo.LastRunUtc
+      $provisioningDaysSinceLastRun = [int]($nowUtc - $provisioningLastRun.ToUniversalTime()).TotalDays
+    }
+    catch {
+      $provisioningLastRun = $null
+      $provisioningDaysSinceLastRun = $null
+    }
+  }
+
+  $hasRecentProvisioningDependency = ($syncInfo.JobCount -eq 1) -and ($null -ne $provisioningDaysSinceLastRun) -and ($provisioningDaysSinceLastRun -le 90)
+
   # --- Risk level (activity + credential liveness) ---
   $tooNew = $null -ne $createdDaysAgo -and $createdDaysAgo -lt 30
   $isActiveByUsage = $null -ne $daysSince -and $daysSince -lt $UnusedDays
@@ -904,6 +1303,10 @@ $report = foreach ($sp in $servicePrincipals) {
     "Medium"
   }
 
+  if ($hasRecentProvisioningDependency) {
+    $riskLevel = "Active"
+  }
+
   # --- Dependency signals (independent of risk level) ---
   $depReasons = @()
   if ($times.DelegatedResourceUtc) { $depReasons += "UsedAsAPI" }
@@ -911,9 +1314,10 @@ $report = foreach ($sp in $servicePrincipals) {
   if ($roleAssignments -gt 0)      { $depReasons += "AppRoleAssignments" }
   if ($oauthClient -gt 0)          { $depReasons += "OAuthClientGrants" }
   if ($oauthResource -gt 0)        { $depReasons += "OAuthResourceGrants" }
-  if ($syncInfo.JobCount -gt 0)    { $depReasons += "ProvisioningJobs" }
+  if ($hasRecentProvisioningDependency) { $depReasons += "ProvisioningJobs" }
   if ($syncInfo.CheckStatus -eq 'Unavailable') { $depReasons += "ProvisioningCheckUnavailable" }
   if ($fedCredInfo.Count -gt 0)    { $depReasons += "FederatedCredentials" }
+  if ($lastFederatedCredentialUse) { $depReasons += "FederatedCredentialUsedInSignInLogs" }
   if ($fedCredInfo.CheckStatus -eq 'Unavailable') { $depReasons += "FederatedCredentialCheckUnavailable" }
   if ($ownershipClass -eq 'NonTenantOwned') { $depReasons += "NonTenantOwned" }
 
@@ -979,7 +1383,7 @@ $report = foreach ($sp in $servicePrincipals) {
     default { 'Manual review required.' }
   }
 
-  [pscustomobject]@{
+  $row = [pscustomobject]@{
     DisplayName              = $spName
     AppId                    = $spAppId
     AppRegistrationObjectId  = $appRegObjectId
@@ -997,6 +1401,9 @@ $report = foreach ($sp in $servicePrincipals) {
     LastInteractiveSignIn    = $lastInteractive
     LastServicePrincipalSignIn = $lastServicePrincipal
     LastManagedIdentitySignIn  = $lastManagedIdentity
+    LastFederatedCredentialUse = $lastFederatedCredentialUse
+    FederatedCredentialUseCount = $federatedCredentialUseCount
+    RecentFederatedCredentialIds = $recentFederatedCredentialIds
     DelegatedClientUtc       = $times.DelegatedClientUtc
     DelegatedResourceUtc     = $times.DelegatedResourceUtc
     AppAuthClientUtc         = $times.AppAuthClientUtc
@@ -1006,7 +1413,7 @@ $report = foreach ($sp in $servicePrincipals) {
     OAuthClientGrants        = $oauthClient
     OAuthResourceGrants      = $oauthResource
     ProvisioningJobCount     = $syncInfo.JobCount
-    ActiveProvisioningJobs   = $syncInfo.ActiveCount
+    ProvisioningLastRunUtc   = $syncInfo.LastRunUtc
     ProvisioningCheckStatus  = $syncInfo.CheckStatus
 
     HasSecrets               = $hasSecrets
@@ -1025,9 +1432,23 @@ $report = foreach ($sp in $servicePrincipals) {
     RecommendedActionReason  = $recommendedActionReason
     DependencySignals        = ($depReasons -join ";")
   }
+
+  $null = $reportRows.Add($row)
+  if ($spId) {
+    $processedIds[$spId] = $true
+  }
+
+  if (($processedIds.Count % $saveEvery) -eq 0 -or $processedIds.Count -eq $servicePrincipals.Count) {
+    Save-RunCheckpoint -Path $RunStatePath -Fingerprint $runFingerprint -Total $servicePrincipals.Count -ProcessedMap $processedIds -Rows $reportRows
+  }
 }
 
 Write-Progress -Activity "Building report" -Completed
+
+$report = @($reportRows)
+if (Test-Path -LiteralPath $RunStatePath) {
+  Write-Host "Run-state retained for same-day reruns: $RunStatePath" -ForegroundColor DarkGray
+}
 
 # ------------------------------------------------------------
 # Filter + sort
@@ -1060,15 +1481,9 @@ $report | Group-Object RiskLevel | Sort-Object Name | ForEach-Object {
 }
 
 Write-Host ""
-  $report | Format-Table DisplayName, OwnershipClass, TrueLastActivity, DaysSinceActivity, RiskLevel, CandidateForDisableReview, DependencySignals -AutoSize
+  $report | Format-Table DisplayName, OwnershipClass, TrueLastActivity, DaysSinceActivity, ProvisioningLastRunUtc, RiskLevel, CandidateForDisableReview, DependencySignals -AutoSize
 
 if ($OutCsv) {
-  # TODO(SQLStorage): keep CSV as an optional local/debug output, but add a SQL persistence path here.
-  # Suggested implementation:
-  # - create a RunId at start of script
-  # - project rows into a stable table schema
-  # - bulk insert or batched upsert into dbo.AppUsageReport
-  # - write run metadata into dbo.AppUsageReportRun
   $report | Export-Csv $OutCsv -NoTypeInformation
   Write-Host "CSV exported to $OutCsv" -ForegroundColor Green
 }
