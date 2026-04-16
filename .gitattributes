@@ -1,5 +1,34 @@
+# Normalize all text files automatically
 * text=auto
-*.ps1 text
+
+# --- PowerShell (cross-platform friendly) ---
+*.ps1  text
 *.psm1 text
 *.psd1 text
-*.md text eol=lf
+
+# --- Config / data ---
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# --- Markdown / docs ---
+*.md   text eol=lf
+*.txt  text
+
+# --- Scripts ---
+*.sh   text eol=lf
+
+# --- Windows-specific ---
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# --- Binary files (never modify) ---
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.exe  binary
+*.dll  binary
+*.pdf  binary
